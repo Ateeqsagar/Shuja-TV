@@ -211,7 +211,7 @@ private fun PlayerBody(list: List<Item>, start: Int, vm: Vm) {
                     if (!item.live) player.playWhenReady = !player.playWhenReady
                     ping++; true
                 }
-                Key.Menu -> { vm.setCfg(vm.cfg.copy(aspect = (vm.cfg.aspect + 1) % 3)); ping++; true }
+                Key.Menu -> { vm.updateCfg(vm.cfg.copy(aspect = (vm.cfg.aspect + 1) % 3)); ping++; true }
                 else -> false
             }
         }

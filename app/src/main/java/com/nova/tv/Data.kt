@@ -431,7 +431,7 @@ class Vm(app: Application) : AndroidViewModel(app) {
         else -> "ShujaTV/1.1"
     }
 
-    fun setCfg(c: Cfg) {
+    fun updateCfg(c: Cfg) {
         val uaChanged = c.ua != cfg.ua
         cfg = c
         saveCfg(cfgSp, c)
@@ -528,7 +528,7 @@ class Vm(app: Application) : AndroidViewModel(app) {
         return Lib(rows, items, adult, names)
     }
 
-    fun setTab(t: Int) {
+    fun selectTab(t: Int) {
         if (t == tab) return
         tab = t
         ensure(t)

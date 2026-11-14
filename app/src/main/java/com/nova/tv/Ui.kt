@@ -285,9 +285,9 @@ fun TopBar(vm: Vm) {
     ) {
         Text("SHUJA TV", color = Red, fontSize = 28.sp, fontWeight = FontWeight.Black, letterSpacing = 1.sp)
         Spacer(Modifier.width(16.dp))
-        NavTab("Live TV", vm.tab == 0) { vm.setTab(0) }
-        NavTab("Movies", vm.tab == 1) { vm.setTab(1) }
-        NavTab("Series", vm.tab == 2) { vm.setTab(2) }
+        NavTab("Live TV", vm.tab == 0) { vm.selectTab(0) }
+        NavTab("Movies", vm.tab == 1) { vm.selectTab(1) }
+        NavTab("Series", vm.tab == 2) { vm.selectTab(2) }
         Spacer(Modifier.weight(1f))
         NavTab("Settings", false) { vm.settingsOpen = true }
         Spacer(Modifier.width(8.dp))
@@ -643,23 +643,23 @@ fun SettingsScreen(vm: Vm) {
                 item { SettingRow("Sign out", "") { vm.logout() } }
 
                 item { SectionTitle("Playback") }
-                item { SettingRow("Live stream format", pick(FORMATS, c.liveFormat)) { vm.setCfg(c.copy(liveFormat = (c.liveFormat + 1) % FORMATS.size)) } }
-                item { SettingRow("Max video quality", pick(QUALITY, c.quality)) { vm.setCfg(c.copy(quality = (c.quality + 1) % QUALITY.size)) } }
-                item { SettingRow("Buffer size", pick(BUFFERS, c.buffer)) { vm.setCfg(c.copy(buffer = (c.buffer + 1) % BUFFERS.size)) } }
-                item { SettingRow("Aspect ratio", pick(ASPECTS, c.aspect)) { vm.setCfg(c.copy(aspect = (c.aspect + 1) % ASPECTS.size)) } }
-                item { SettingRow("Audio language", pick(AUDIO_NAMES, c.audio)) { vm.setCfg(c.copy(audio = (c.audio + 1) % AUDIO_NAMES.size)) } }
-                item { SettingRow("Subtitles", onOff(c.subs)) { vm.setCfg(c.copy(subs = !c.subs)) } }
-                item { SettingRow("Resume where you left off", onOff(c.resume)) { vm.setCfg(c.copy(resume = !c.resume)) } }
-                item { SettingRow("Autoplay next episode", onOff(c.autoNext)) { vm.setCfg(c.copy(autoNext = !c.autoNext)) } }
-                item { SettingRow("Connect as (user agent)", pick(AGENTS, c.ua)) { vm.setCfg(c.copy(ua = (c.ua + 1) % AGENTS.size)) } }
+                item { SettingRow("Live stream format", pick(FORMATS, c.liveFormat)) { vm.updateCfg(c.copy(liveFormat = (c.liveFormat + 1) % FORMATS.size)) } }
+                item { SettingRow("Max video quality", pick(QUALITY, c.quality)) { vm.updateCfg(c.copy(quality = (c.quality + 1) % QUALITY.size)) } }
+                item { SettingRow("Buffer size", pick(BUFFERS, c.buffer)) { vm.updateCfg(c.copy(buffer = (c.buffer + 1) % BUFFERS.size)) } }
+                item { SettingRow("Aspect ratio", pick(ASPECTS, c.aspect)) { vm.updateCfg(c.copy(aspect = (c.aspect + 1) % ASPECTS.size)) } }
+                item { SettingRow("Audio language", pick(AUDIO_NAMES, c.audio)) { vm.updateCfg(c.copy(audio = (c.audio + 1) % AUDIO_NAMES.size)) } }
+                item { SettingRow("Subtitles", onOff(c.subs)) { vm.updateCfg(c.copy(subs = !c.subs)) } }
+                item { SettingRow("Resume where you left off", onOff(c.resume)) { vm.updateCfg(c.copy(resume = !c.resume)) } }
+                item { SettingRow("Autoplay next episode", onOff(c.autoNext)) { vm.updateCfg(c.copy(autoNext = !c.autoNext)) } }
+                item { SettingRow("Connect as (user agent)", pick(AGENTS, c.ua)) { vm.updateCfg(c.copy(ua = (c.ua + 1) % AGENTS.size)) } }
 
                 item { SectionTitle("Interface") }
-                item { SettingRow("Start on", pick(STARTS, c.startTab)) { vm.setCfg(c.copy(startTab = (c.startTab + 1) % STARTS.size)) } }
-                item { SettingRow("Sort lists", pick(SORTS, c.sort)) { vm.setCfg(c.copy(sort = (c.sort + 1) % SORTS.size)) } }
-                item { SettingRow("Banner at top of lists", onOff(c.hero)) { vm.setCfg(c.copy(hero = !c.hero)) } }
-                item { SettingRow("Programme guide on channels", onOff(c.epg)) { vm.setCfg(c.copy(epg = !c.epg)) } }
-                item { SettingRow("Focus zoom animation", onOff(c.anim)) { vm.setCfg(c.copy(anim = !c.anim)) } }
-                item { SettingRow("Hide adult categories", onOff(c.hideAdult)) { vm.setCfg(c.copy(hideAdult = !c.hideAdult)) } }
+                item { SettingRow("Start on", pick(STARTS, c.startTab)) { vm.updateCfg(c.copy(startTab = (c.startTab + 1) % STARTS.size)) } }
+                item { SettingRow("Sort lists", pick(SORTS, c.sort)) { vm.updateCfg(c.copy(sort = (c.sort + 1) % SORTS.size)) } }
+                item { SettingRow("Banner at top of lists", onOff(c.hero)) { vm.updateCfg(c.copy(hero = !c.hero)) } }
+                item { SettingRow("Programme guide on channels", onOff(c.epg)) { vm.updateCfg(c.copy(epg = !c.epg)) } }
+                item { SettingRow("Focus zoom animation", onOff(c.anim)) { vm.updateCfg(c.copy(anim = !c.anim)) } }
+                item { SettingRow("Hide adult categories", onOff(c.hideAdult)) { vm.updateCfg(c.copy(hideAdult = !c.hideAdult)) } }
 
                 item { SectionTitle("Parental control and favorites") }
                 item { SettingRow("Locked and hidden items", if (vm.unlocked) "Unlocked (tap to lock)" else "Locked (tap to unlock)") { vm.toggleUnlock() } }
