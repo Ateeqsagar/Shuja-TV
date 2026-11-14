@@ -244,8 +244,8 @@ fun TopBar(vm: Vm) {
     ) {
         Text("SHUJA TV", color = Red, fontSize = 30.sp, fontWeight = FontWeight.Black, letterSpacing = 1.sp)
         Spacer(Modifier.width(20.dp))
-        NavTab("Live TV", vm.live) { vm.setLive(true) }
-        NavTab("Movies", !vm.live) { vm.setLive(false) }
+        NavTab("Live TV", vm.live) { vm.switchLive(true) }
+        NavTab("Movies", !vm.live) { vm.switchLive(false) }
         Spacer(Modifier.weight(1f))
         Field(vm.query, { vm.query = it }, "Search", Modifier.width(220.dp))
         NavTab(if (vm.unlocked) "Lock now" else "Unlock", vm.unlocked) { vm.toggleUnlock() }
