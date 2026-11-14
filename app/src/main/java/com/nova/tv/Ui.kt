@@ -8,6 +8,9 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.itemsIndexed as gridItemsIndexed
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -30,6 +33,7 @@ import androidx.compose.ui.input.key.*
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -55,6 +59,9 @@ val Dim = Color(0xFFB3B3B3)
 val Light = Color(0xFFE5E5E5)
 val KeyBg = Color(0xFF333333)
 val RedBrush: Brush = SolidColor(Red)
+
+/** A titled group of items: a category, or a special row such as Continue Watching. cont is set only for Continue Watching. */
+class Section(val title: String, val items: List<Item>, val cont: List<Hist>? = null)
 
 /** Focus can race the first layout of a new window; retry briefly instead of crashing. */
 suspend fun FocusRequester.grab() {
@@ -256,7 +263,7 @@ fun LoginScreen(vm: Vm) {
     var user by remember { mutableStateOf("") }
     var pass by remember { mutableStateOf("") }
     Box(Modifier.fillMaxSize()) {
-        Text("SHUJA TV", color = Red, fontSize = 36.sp, fontWeight = FontWeight.Black, letterSpacing = 2.sp, modifier = Modifier.padding(48.dp))
+        Image(painter = painterResource(R.drawable.logo), contentDescription = null, modifier = Modifier.padding(32.dp).size(96.dp))
         Column(
             Modifier.align(Alignment.Center).width(480.dp).clip(RoundedCornerShape(8.dp))
                 .background(Color.Black.copy(.75f)).padding(48.dp),
@@ -324,6 +331,18 @@ fun Home(vm: Vm) {
     val favs = remember(lib, vm.favKeys, vm.hiddenKeys, vm.unlocked, cfg.hideAdult) {
         if (lib == null) emptyList<Item>() else vm.favItems(lib)
     }
+    val cont = remember(vm.hist, tab, cfg.contRow, vm.hiddenKeys, vm.unlocked) { vm.contFor(tab) }
+    val recent = remember(lib, tab, cfg.recentRow, vm.hiddenKeys, vm.unlocked, cfg.hideAdult) {
+        if (lib == null || tab == T_LIVE) emptyList<Item>() else vm.recentFor(lib)
+    }
+    val sections = remember(cont, recent, favs, rows) {
+        val out = ArrayList<Section>()
+        if (cont.isNotEmpty()) out.add(Section("Continue Watching", cont.map { vm.contItem(it) }, cont))
+        if (recent.isNotEmpty()) out.add(Section("Recently Added", recent))
+        if (favs.isNotEmpty()) out.add(Section("Favorites", favs))
+        for ((c, l) in rows) out.add(Section(c.name, l))
+        out
+    }
 
     Column(Modifier.fillMaxSize()) {
         TopBar(vm)
@@ -331,7 +350,10 @@ fun Home(vm: Vm) {
             if (q.isNotBlank()) {
                 SearchResults(vm, res, q)
             } else if (lib != null) {
-                key(tab) { Shelves(vm, rows, favs) }
+                key(tab, cfg.layout) {
+                    if (cfg.layout == 1) GridLayout(vm, sections)
+                    else Shelves(vm, sections, rows.firstOrNull())
+                }
             } else {
                 val err = vm.errs[tab]
                 Column(
@@ -352,21 +374,81 @@ fun Home(vm: Vm) {
 }
 
 @Composable
-fun Shelves(vm: Vm, rows: List<Pair<Category, List<Item>>>, favs: List<Item>) {
-    if (rows.isEmpty() && favs.isEmpty()) {
+fun Shelves(vm: Vm, sections: List<Section>, heroSrc: Pair<Category, List<Item>>?) {
+    if (sections.isEmpty()) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Text("Nothing to show here.", color = Dim, fontSize = 20.sp)
         }
         return
     }
-    val hero = if (vm.cfg.hero) rows.firstOrNull() else null
-    val heroItem = hero?.second?.firstOrNull { it.icon != null && !vm.isLocked(it) }
+    val heroList = if (vm.cfg.hero) heroSrc else null
+    val heroItem = heroList?.second?.firstOrNull { it.icon != null && !vm.isLocked(it) }
     LazyColumn(Modifier.fillMaxSize()) {
-        if (hero != null && heroItem != null) {
-            item { Hero(heroItem, hero.first.name) { vm.open(hero.second, hero.second.indexOf(heroItem)) } }
+        if (heroList != null && heroItem != null) {
+            item { Hero(heroItem, heroList.first.name) { vm.open(heroList.second, heroList.second.indexOf(heroItem)) } }
         }
-        if (favs.isNotEmpty()) item { ShelfRow(vm, "Favorites", favs) }
-        items(rows) { (c, list) -> ShelfRow(vm, c.name, list) }
+        items(sections) { sec -> ShelfRow(vm, sec.title, sec.items, sec.cont) }
+    }
+}
+
+@Composable
+fun CatRow(title: String, count: Int, selected: Boolean, onFocus: () -> Unit, onClick: () -> Unit) {
+    var f by remember { mutableStateOf(false) }
+    Row(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(6.dp))
+            .background(if (f) Color.White else if (selected) KeyBg else Color.Transparent)
+            .onFocusChanged { f = it.hasFocus; if (it.hasFocus) onFocus() }
+            .clickable(onClick = onClick).padding(horizontal = 14.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Text(title, color = if (f) Color.Black else if (selected) Color.White else Dim, fontSize = 17.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+        Text("$count", color = if (f) Color(0xFF333333) else Dim, fontSize = 13.sp, maxLines = 1)
+    }
+}
+
+/** Category list on the left, poster grid on the right. */
+@Composable
+fun GridLayout(vm: Vm, sections: List<Section>) {
+    if (sections.isEmpty()) {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Text("Nothing to show here.", color = Dim, fontSize = 20.sp)
+        }
+        return
+    }
+    val fm = LocalFocusManager.current
+    var sel by remember { mutableIntStateOf(0) }
+    val cur = sel.coerceIn(0, sections.lastIndex)
+    val sec = sections[cur]
+    val live = vm.tab == T_LIVE
+    val k = when (vm.cfg.cardSize) {
+        0 -> 0.85f
+        2 -> 1.25f
+        else -> 1f
+    }
+    Row(Modifier.fillMaxSize()) {
+        LazyColumn(
+            Modifier.width(290.dp).fillMaxHeight().padding(start = 32.dp, top = 8.dp, end = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(3.dp)
+        ) {
+            itemsIndexed(sections) { i, s ->
+                CatRow(s.title, s.items.size, i == cur, { sel = i }) { fm.moveFocus(FocusDirection.Right) }
+            }
+        }
+        LazyVerticalGrid(
+            columns = GridCells.Adaptive((if (live) 220.dp else 156.dp) * k),
+            modifier = Modifier.weight(1f).fillMaxHeight(),
+            contentPadding = PaddingValues(start = 16.dp, end = 32.dp, top = 12.dp, bottom = 24.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            gridItemsIndexed(sec.items) { i, item ->
+                PosterCard(vm, item) {
+                    val c = sec.cont
+                    if (c != null) vm.resumeHist(c[i]) else vm.open(sec.items, i)
+                }
+            }
+        }
     }
 }
 
@@ -418,14 +500,16 @@ fun Hero(item: Item, label: String, onPlay: () -> Unit) {
 }
 
 @Composable
-fun ShelfRow(vm: Vm, title: String, list: List<Item>) {
+fun ShelfRow(vm: Vm, title: String, list: List<Item>, cont: List<Hist>? = null) {
     Column {
         Text(title, color = Light, fontSize = 22.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(start = 48.dp, end = 48.dp, top = 8.dp))
         LazyRow(
             contentPadding = PaddingValues(horizontal = 48.dp, vertical = 18.dp),
             horizontalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            itemsIndexed(list) { i, item -> PosterCard(vm, item) { vm.open(list, i) } }
+            itemsIndexed(list) { i, item ->
+                PosterCard(vm, item) { if (cont != null) vm.resumeHist(cont[i]) else vm.open(list, i) }
+            }
         }
     }
 }
@@ -438,6 +522,12 @@ fun PosterCard(vm: Vm, item: Item, onClick: () -> Unit) {
     val live = item.live
     val s by animateFloatAsState(if (f && cfg.anim) 1.08f else 1f, tween(110), label = "s")
     val shape = RoundedCornerShape(6.dp)
+    val k = when (cfg.cardSize) {
+        0 -> 0.85f
+        2 -> 1.25f
+        else -> 1f
+    }
+    val showLabel = cfg.titles || item.icon == null || f
     val locked = vm.isLocked(item)
     val hidden = vm.isHidden(item)
     val mask = locked && !vm.unlocked
@@ -448,7 +538,7 @@ fun PosterCard(vm: Vm, item: Item, onClick: () -> Unit) {
         LaunchedEffect(f) { if (f) { delay(500); vm.loadEpg(item) } }
     }
     Box(
-        Modifier.width(if (live) 200.dp else 140.dp)
+        Modifier.width((if (live) 200.dp else 140.dp) * k)
             .aspectRatio(if (live) 16f / 9f else 2f / 3f)
             .zIndex(if (f) 1f else 0f).graphicsLayer { scaleX = s; scaleY = s }
             .clip(shape).background(Panel)
@@ -488,7 +578,7 @@ fun PosterCard(vm: Vm, item: Item, onClick: () -> Unit) {
                 if (hidden) Tag("HIDDEN", Color(0xFF555555))
             }
         }
-        Column(
+        if (showLabel) Column(
             Modifier.align(Alignment.BottomCenter).fillMaxWidth()
                 .background(Color.Black.copy(.72f)).padding(horizontal = 8.dp, vertical = 5.dp)
         ) {
@@ -617,6 +707,8 @@ private val ASPECTS = listOf("Fit", "Fill", "Zoom")
 private val AGENTS = listOf("Default", "VLC", "Chrome", "IPTV Smarters")
 private val STARTS = listOf("Live TV", "Movies", "Series")
 private val SORTS = listOf("Provider order", "A to Z")
+private val LAYOUTS = listOf("Rows", "Category list and grid")
+private val CARDS = listOf("Small", "Medium", "Large")
 
 @Composable
 fun SettingsScreen(vm: Vm) {
@@ -636,6 +728,7 @@ fun SettingsScreen(vm: Vm) {
                 item { SectionTitle("Account") }
                 item { SettingRow("Server", vm.account?.host ?: "") {} }
                 item { SettingRow("Username", vm.account?.user ?: "") {} }
+                item { SettingRow("Password", "****") {} }
                 item { SettingRow("Subscription", vm.info.status.ifBlank { "Active" }) {} }
                 item { SettingRow("Expires", vm.info.exp.ifBlank { "Unknown" }) {} }
                 item { SettingRow("Connections", "${vm.info.activeCons.ifBlank { "0" }} of ${vm.info.maxCons.ifBlank { "?" }} in use") {} }
@@ -653,6 +746,12 @@ fun SettingsScreen(vm: Vm) {
                 item { SettingRow("Autoplay next episode", onOff(c.autoNext)) { vm.updateCfg(c.copy(autoNext = !c.autoNext)) } }
                 item { SettingRow("Connect as (user agent)", pick(AGENTS, c.ua)) { vm.updateCfg(c.copy(ua = (c.ua + 1) % AGENTS.size)) } }
 
+                item { SectionTitle("Layout") }
+                item { SettingRow("Home layout", pick(LAYOUTS, c.layout)) { vm.updateCfg(c.copy(layout = (c.layout + 1) % LAYOUTS.size)) } }
+                item { SettingRow("Card size", pick(CARDS, c.cardSize)) { vm.updateCfg(c.copy(cardSize = (c.cardSize + 1) % CARDS.size)) } }
+                item { SettingRow("Card titles", if (c.titles) "Always" else "Only when focused") { vm.updateCfg(c.copy(titles = !c.titles)) } }
+                item { SettingRow("Continue watching row", onOff(c.contRow)) { vm.updateCfg(c.copy(contRow = !c.contRow)) } }
+                item { SettingRow("Recently added row", onOff(c.recentRow)) { vm.updateCfg(c.copy(recentRow = !c.recentRow)) } }
                 item { SectionTitle("Interface") }
                 item { SettingRow("Start on", pick(STARTS, c.startTab)) { vm.updateCfg(c.copy(startTab = (c.startTab + 1) % STARTS.size)) } }
                 item { SettingRow("Sort lists", pick(SORTS, c.sort)) { vm.updateCfg(c.copy(sort = (c.sort + 1) % SORTS.size)) } }
@@ -685,7 +784,7 @@ fun SettingsScreen(vm: Vm) {
                     val rt = Runtime.getRuntime()
                     val used = (rt.totalMemory() - rt.freeMemory()) / 1048576
                     val max = rt.maxMemory() / 1048576
-                    SettingRow("About", "Shuja TV 1.1  |  ${Build.MODEL}  |  Android ${Build.VERSION.RELEASE}  |  ${used}/${max} MB") {}
+                    SettingRow("About", "Shuja TV $APP_VERSION  |  ${Build.MODEL}  |  Android ${Build.VERSION.RELEASE}  |  ${used}/${max} MB") {}
                 }
             }
         }

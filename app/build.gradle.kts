@@ -10,13 +10,24 @@ android {
         applicationId = "com.nova.tv"
         minSdk = 21
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        // versionCode grows with every build (minutes since 1970), so each new APK installs over the previous one.
+        versionCode = (System.currentTimeMillis() / 60000L).toInt()
+        versionName = "01"
+    }
+    signingConfigs {
+        // Fixed key kept in the repo: every build is signed the same way, so updates install over the old app.
+        create("shuja") {
+            storeFile = file("shuja-release.jks")
+            storeType = "pkcs12"
+            storePassword = "shujatv123"
+            keyAlias = "shuja"
+            keyPassword = "shujatv123"
+        }
     }
     buildTypes {
         release {
             isMinifyEnabled = false
-            signingConfig = signingConfigs.getByName("debug") // sideload-ready
+            signingConfig = signingConfigs.getByName("shuja")
         }
     }
     compileOptions {

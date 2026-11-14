@@ -22,6 +22,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
 import org.json.JSONException
 import org.json.JSONObject
 import java.io.IOException
@@ -43,6 +44,8 @@ const val T_MOVIE = 1
 const val T_SERIES = 2
 const val T_EP = 3
 
+const val APP_VERSION = "01"
+
 val AUDIO_CODES = listOf("", "en", "ar", "hi", "ur", "fr", "es", "de", "tr")
 val AUDIO_NAMES = listOf("Auto", "English", "Arabic", "Hindi", "Urdu", "French", "Spanish", "German", "Turkish")
 
@@ -58,6 +61,7 @@ data class Item(
     val cat: String,
     val type: Int,
     val ext: String = "",
+    val added: Long = 0L,
     val lc: String = name.lowercase()
 ) {
     val live: Boolean get() = type == T_LIVE
@@ -67,7 +71,8 @@ class Lib(
     val rows: List<Pair<Category, List<Item>>>,
     val all: List<Item>,
     val adult: Set<String>,
-    val names: Map<String, String>
+    val names: Map<String, String>,
+    val recent: List<Item>
 )
 
 class SearchRes(val live: List<Item>, val movies: List<Item>, val series: List<Item>)
@@ -79,6 +84,9 @@ data class Epg(val list: List<Prog>, val at: Long) {
     fun now(t: Long): Prog? = list.firstOrNull { t >= it.start * 1000 && t < it.end * 1000 }
     fun next(t: Long): Prog? = list.firstOrNull { it.start * 1000 > t }
 }
+
+/** One "continue watching" entry. item = movie or episode; series is set for episodes. */
+class Hist(val item: Item, val series: Item?, val at: Long)
 
 class PinReq(val title: String, val create: Boolean, val onOk: () -> Unit)
 class MenuTarget(val item: Item, val catId: String, val catName: String)
@@ -98,7 +106,12 @@ data class Cfg(
     val hero: Boolean = false,
     val epg: Boolean = true,
     val anim: Boolean = true,
-    val hideAdult: Boolean = false
+    val hideAdult: Boolean = false,
+    val layout: Int = 0,
+    val cardSize: Int = 1,
+    val titles: Boolean = true,
+    val contRow: Boolean = true,
+    val recentRow: Boolean = true
 )
 
 fun loadCfg(sp: SharedPreferences): Cfg {
@@ -118,7 +131,12 @@ fun loadCfg(sp: SharedPreferences): Cfg {
         hero = sp.getBoolean("hero", d.hero),
         epg = sp.getBoolean("epg", d.epg),
         anim = sp.getBoolean("anim", d.anim),
-        hideAdult = sp.getBoolean("hideAdult", d.hideAdult)
+        hideAdult = sp.getBoolean("hideAdult", d.hideAdult),
+        layout = sp.getInt("layout", d.layout).coerceIn(0, 1),
+        cardSize = sp.getInt("cardSize", d.cardSize).coerceIn(0, 2),
+        titles = sp.getBoolean("titles", d.titles),
+        contRow = sp.getBoolean("contRow", d.contRow),
+        recentRow = sp.getBoolean("recentRow", d.recentRow)
     )
 }
 
@@ -129,7 +147,42 @@ fun saveCfg(sp: SharedPreferences, c: Cfg) {
         .putBoolean("subs", c.subs).putBoolean("resume", c.resume).putBoolean("autoNext", c.autoNext)
         .putInt("ua", c.ua).putInt("sort", c.sort).putBoolean("hero", c.hero)
         .putBoolean("epg", c.epg).putBoolean("anim", c.anim).putBoolean("hideAdult", c.hideAdult)
+        .putInt("layout", c.layout).putInt("cardSize", c.cardSize).putBoolean("titles", c.titles)
+        .putBoolean("contRow", c.contRow).putBoolean("recentRow", c.recentRow)
         .apply()
+}
+
+private fun itemJson(i: Item): JSONObject =
+    JSONObject().put("id", i.id).put("n", i.name).put("i", i.icon ?: "").put("c", i.cat).put("t", i.type).put("e", i.ext)
+
+private fun itemFrom(o: JSONObject): Item =
+    Item(o.getString("id"), o.optString("n"), o.optString("i").ifBlank { null }, o.optString("c"), o.optInt("t"), o.optString("e"))
+
+fun loadHist(sp: SharedPreferences): List<Hist> {
+    val raw = sp.getString("j", null) ?: return emptyList()
+    return try {
+        val arr = JSONArray(raw)
+        val out = ArrayList<Hist>()
+        for (k in 0 until arr.length()) {
+            val o = arr.getJSONObject(k)
+            val se = o.optJSONObject("se")
+            out.add(Hist(itemFrom(o.getJSONObject("it")), if (se != null) itemFrom(se) else null, o.optLong("at")))
+        }
+        out
+    } catch (e: Exception) {
+        emptyList()
+    }
+}
+
+fun saveHist(sp: SharedPreferences, list: List<Hist>) {
+    val arr = JSONArray()
+    for (h in list) {
+        val o = JSONObject().put("it", itemJson(h.item)).put("at", h.at)
+        val se = h.series
+        if (se != null) o.put("se", itemJson(se))
+        arr.put(o)
+    }
+    sp.edit().putString("j", arr.toString()).apply()
 }
 
 private fun JSONObject.s(k: String): String {
@@ -167,6 +220,7 @@ private fun parseItems(r: JsonReader, type: Int, idKey: String, iconKey: String)
         var icon = ""
         var cat = ""
         var ext = ""
+        var added = 0L
         r.beginObject()
         while (r.hasNext()) {
             val key = r.nextName()
@@ -176,13 +230,17 @@ private fun parseItems(r: JsonReader, type: Int, idKey: String, iconKey: String)
                 iconKey -> icon = r.str()
                 "category_id" -> cat = r.str()
                 "container_extension" -> ext = r.str()
+                "added", "last_modified" -> {
+                    val v = r.str().toLongOrNull() ?: 0L
+                    if (v > added) added = v
+                }
                 else -> r.skipValue()
             }
         }
         r.endObject()
         if (id.isNotEmpty()) {
             val ic = if (icon.isNotBlank() && icon != "null") icon else null
-            out.add(Item(id, name.ifBlank { id }, ic, cat, type, ext))
+            out.add(Item(id, name.ifBlank { id }, ic, cat, type, ext, added))
         }
     }
     r.endArray()
@@ -376,6 +434,7 @@ class Vm(app: Application) : AndroidViewModel(app) {
     private val cfgSp = app.getSharedPreferences("nova_cfg", 0)
     private val favSp = app.getSharedPreferences("nova_fav", 0)
     private val posSp = app.getSharedPreferences("nova_pos", 0)
+    private val histSp = app.getSharedPreferences("nova_hist", 0)
     private val vault = Vault(app)
     private var api: Xtream? = null
     private var job: Job? = null
@@ -398,6 +457,10 @@ class Vm(app: Application) : AndroidViewModel(app) {
     var detail by mutableStateOf<Item?>(null); private set
     var detailInfo by mutableStateOf<SeriesDetail?>(null); private set
     var detailErr by mutableStateOf<String?>(null); private set
+
+    // ---- continue watching ----
+    var hist by mutableStateOf(loadHist(histSp)); private set
+    private var histSeries: Item? = null
 
     // ---- favorites ----
     var favKeys by mutableStateOf<Set<String>>(favSp.getStringSet("k", emptySet())?.toSet() ?: emptySet()); private set
@@ -428,7 +491,7 @@ class Vm(app: Application) : AndroidViewModel(app) {
         1 -> "VLC/3.0.18 LibVLC/3.0.18"
         2 -> "Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         3 -> "IPTVSmartersPro"
-        else -> "ShujaTV/1.1"
+        else -> "ShujaTV/01"
     }
 
     fun updateCfg(c: Cfg) {
@@ -525,7 +588,8 @@ class Vm(app: Application) : AndroidViewModel(app) {
         for (c in cats) if (isAdult(c.name)) adult.add(c.id)
         val names = HashMap<String, String>()
         for (c in cats) names[c.id] = c.name
-        return Lib(rows, items, adult, names)
+        val recent = if (items.isEmpty() || items[0].type == T_LIVE) emptyList<Item>() else items.filter { it.added > 0L }.sortedByDescending { it.added }.take(80)
+        return Lib(rows, items, adult, names, recent)
     }
 
     fun selectTab(t: Int) {
@@ -541,6 +605,7 @@ class Vm(app: Application) : AndroidViewModel(app) {
         libs.clear(); errs.clear(); loadingSet.clear(); loadingTypes = emptySet()
         playing = null; detail = null; detailInfo = null; settingsOpen = false
         unlocked = false; epgMap.clear(); query = ""; error = null; menu = null; pinReq = null
+        hist = emptyList(); histSp.edit().clear().apply()
     }
 
     // ---- rows / search ----
@@ -607,6 +672,7 @@ class Vm(app: Application) : AndroidViewModel(app) {
     fun play(list: List<Item>, i: Int) {
         if (i !in list.indices) return
         val item = list[i]
+        histSeries = if (item.type == T_EP) detail else null
         if (!unlocked && isLocked(item)) askPin("Enter PIN to watch") { playing = list to i } else playing = list to i
     }
     fun stop() { playing = null }
@@ -616,25 +682,90 @@ class Vm(app: Application) : AndroidViewModel(app) {
     fun savePos(item: Item, pos: Long, dur: Long) {
         if (item.live || !cfg.resume) return
         val k = itemKey(item)
+        val keep = dur > 0 && pos > 15_000 && pos < dur - 45_000
         val e = posSp.edit()
-        if (dur > 0 && pos > 15_000 && pos < dur - 45_000) e.putLong(k, pos) else e.remove(k)
+        if (keep) e.putLong(k, pos) else e.remove(k)
         e.apply()
+        if (keep) touchHist(item) else dropHist(item)
     }
 
-    fun clearResume() { posSp.edit().clear().apply() }
+    private fun touchHist(item: Item) {
+        val first = hist.firstOrNull()
+        if (first != null && first.item.type == item.type && first.item.id == item.id) return
+        val series = if (item.type == T_EP) histSeries else null
+        if (item.type == T_EP && series == null) return
+        val nh = ArrayList<Hist>()
+        nh.add(Hist(item, series, System.currentTimeMillis()))
+        for (h in hist) {
+            val same = if (item.type == T_EP) {
+                h.item.type == T_EP && h.series?.id == series?.id
+            } else {
+                h.item.type == item.type && h.item.id == item.id
+            }
+            if (!same && nh.size < 30) nh.add(h)
+        }
+        hist = nh
+        saveHist(histSp, nh)
+    }
+
+    private fun dropHist(item: Item) {
+        if (hist.isEmpty()) return
+        val nh = hist.filter { h -> !(h.item.type == item.type && h.item.id == item.id) }
+        if (nh.size != hist.size) {
+            hist = nh
+            saveHist(histSp, nh)
+        }
+    }
+
+    fun clearResume() {
+        posSp.edit().clear().apply()
+        hist = emptyList()
+        histSp.edit().clear().apply()
+    }
+
+    fun contFor(tab: Int): List<Hist> {
+        if (!cfg.contRow || tab == T_LIVE) return emptyList()
+        val want = if (tab == T_MOVIE) T_MOVIE else T_EP
+        return hist.filter { h ->
+            h.item.type == want && (want == T_MOVIE || h.series != null) && (unlocked || !isHidden(h.series ?: h.item))
+        }
+    }
+
+    fun contItem(h: Hist): Item = h.series ?: h.item
+
+    fun recentFor(lib: Lib): List<Item> {
+        if (!cfg.recentRow) return emptyList()
+        return lib.recent.filter { passes(it, lib) }.take(40)
+    }
+
+    fun resumeHist(h: Hist) {
+        if (h.item.type == T_EP) {
+            val s = h.series ?: return
+            if (!unlocked && isLocked(s)) askPin("Enter PIN to open") { loadSeries(s, h.item.id) } else loadSeries(s, h.item.id)
+        } else {
+            play(listOf(h.item), 0)
+        }
+    }
 
     // ---- series ----
     fun openSeries(item: Item) {
         if (!unlocked && isLocked(item)) askPin("Enter PIN to open") { loadSeries(item) } else loadSeries(item)
     }
 
-    private fun loadSeries(item: Item) {
+    private fun loadSeries(item: Item, autoEp: String? = null) {
         val x = api ?: return
         detail = item; detailInfo = null; detailErr = null
         viewModelScope.launch {
             try {
                 val d = x.seriesInfo(item.id)
-                if (detail?.id == item.id) detailInfo = d
+                if (detail?.id == item.id) {
+                    detailInfo = d
+                    if (autoEp != null) {
+                        val all = d.eps.values.flatten()
+                        val idx = all.indexOfFirst { it.id == autoEp }
+                        if (idx >= 0) play(all, idx)
+                    }
+                }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Throwable) {
