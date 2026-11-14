@@ -205,8 +205,8 @@ private fun PlayerBody(list: List<Item>, start: Int, vm: Vm) {
             when (k) {
                 Key.DirectionUp, Key.ChannelUp -> { if (item.live) idx = step(1); ping++; true }
                 Key.DirectionDown, Key.ChannelDown -> { if (item.live) idx = step(-1); ping++; true }
-                Key.DirectionRight -> { if (!item.live) player.seekTo(player.currentPosition + 10_000); ping++; true }
-                Key.DirectionLeft -> { if (!item.live) player.seekTo((player.currentPosition - 10_000).coerceAtLeast(0L)); ping++; true }
+                Key.DirectionRight -> { if (!item.live) player.seekTo(player.currentPosition + vm.cfg.seekSeconds * 1000L); ping++; true }
+                Key.DirectionLeft -> { if (!item.live) player.seekTo((player.currentPosition - vm.cfg.seekSeconds * 1000L).coerceAtLeast(0L)); ping++; true }
                 Key.DirectionCenter, Key.Enter, Key.NumPadEnter, Key.MediaPlayPause -> {
                     if (!item.live) player.playWhenReady = !player.playWhenReady
                     ping++; true
@@ -276,7 +276,7 @@ private fun PlayerBody(list: List<Item>, start: Int, vm: Vm) {
                     }
                 }
                 Text(
-                    if (item.live) "▲ ▼  channel     MENU  aspect" else "◀ ▶  seek 10s     OK  pause     MENU  aspect",
+                    if (item.live) "▲ ▼  channel     MENU  aspect" else "◀ ▶  seek ${vm.cfg.seekSeconds}s     OK  pause     MENU  aspect",
                     color = Dim, fontSize = 16.sp
                 )
             }

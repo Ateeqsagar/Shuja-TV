@@ -49,7 +49,7 @@ const val APP_VERSION = "01"
 val AUDIO_CODES = listOf("", "en", "ar", "hi", "ur", "fr", "es", "de", "tr")
 val AUDIO_NAMES = listOf("Auto", "English", "Arabic", "Hindi", "Urdu", "French", "Spanish", "German", "Turkish")
 
-data class Account(val host: String, val user: String, val pass: String)
+data class Account(val host: String, val user: String, val pass: String, val kind: Int = 0) // 0 = Xtream, 1 = M3U URL
 data class AcctInfo(val status: String = "", val exp: String = "", val maxCons: String = "", val activeCons: String = "")
 data class Category(val id: String, val name: String)
 
@@ -111,7 +111,8 @@ data class Cfg(
     val cardSize: Int = 1,
     val titles: Boolean = true,
     val contRow: Boolean = true,
-    val recentRow: Boolean = true
+    val recentRow: Boolean = true,
+    val seekSeconds: Int = 10
 )
 
 fun loadCfg(sp: SharedPreferences): Cfg {
@@ -136,7 +137,8 @@ fun loadCfg(sp: SharedPreferences): Cfg {
         cardSize = sp.getInt("cardSize", d.cardSize).coerceIn(0, 2),
         titles = sp.getBoolean("titles", d.titles),
         contRow = sp.getBoolean("contRow", d.contRow),
-        recentRow = sp.getBoolean("recentRow", d.recentRow)
+        recentRow = sp.getBoolean("recentRow", d.recentRow),
+        seekSeconds = sp.getInt("seekSeconds", d.seekSeconds).coerceIn(5, 300)
     )
 }
 
@@ -149,7 +151,7 @@ fun saveCfg(sp: SharedPreferences, c: Cfg) {
         .putBoolean("epg", c.epg).putBoolean("anim", c.anim).putBoolean("hideAdult", c.hideAdult)
         .putInt("layout", c.layout).putInt("cardSize", c.cardSize).putBoolean("titles", c.titles)
         .putBoolean("contRow", c.contRow).putBoolean("recentRow", c.recentRow)
-        .apply()
+        .putInt("seekSeconds", c.seekSeconds).apply()
 }
 
 private fun itemJson(i: Item): JSONObject =
@@ -247,7 +249,16 @@ private fun parseItems(r: JsonReader, type: Int, idKey: String, iconKey: String)
     return out
 }
 
-class Xtream(private val a: Account, private val ua: String) {
+interface Source {
+    suspend fun login(): AcctInfo
+    suspend fun categories(type: Int): List<Category>
+    suspend fun items(type: Int): List<Item>
+    suspend fun seriesInfo(id: String): SeriesDetail
+    suspend fun shortEpg(id: String): List<Prog>
+    fun url(item: Item, ts: Boolean): String
+}
+
+class Xtream(private val a: Account, private val ua: String) : Source {
     val base = a.host.trim().let { if (it.startsWith("http")) it else "http://$it" }.trimEnd('/')
     private fun enc(s: String) = URLEncoder.encode(s, "UTF-8")
 
@@ -287,13 +298,13 @@ class Xtream(private val a: Account, private val ua: String) {
         }
     }
 
-    fun url(item: Item, ts: Boolean): String = when (item.type) {
+    override fun url(item: Item, ts: Boolean): String = when (item.type) {
         T_LIVE -> "$base/live/${a.user}/${a.pass}/${item.id}.${if (ts) "ts" else "m3u8"}"
         T_MOVIE -> "$base/movie/${a.user}/${a.pass}/${item.id}.${item.ext.ifBlank { "mp4" }}"
         else -> "$base/series/${a.user}/${a.pass}/${item.id}.${item.ext.ifBlank { "mp4" }}"
     }
 
-    suspend fun login(): AcctInfo {
+    override suspend fun login(): AcctInfo {
         val ui = JSONObject(text("")).optJSONObject("user_info") ?: error("Invalid server response")
         if (ui.optInt("auth") != 1) error("Wrong username or password")
         val status = ui.s("status")
@@ -303,7 +314,7 @@ class Xtream(private val a: Account, private val ua: String) {
         return AcctInfo(status.ifBlank { "Active" }, exp, ui.s("max_connections"), ui.s("active_cons"))
     }
 
-    suspend fun categories(type: Int): List<Category> {
+    override suspend fun categories(type: Int): List<Category> {
         val kind = when (type) {
             T_LIVE -> "live"
             T_MOVIE -> "vod"
@@ -339,13 +350,13 @@ class Xtream(private val a: Account, private val ua: String) {
         }
     }
 
-    suspend fun items(type: Int): List<Item> = when (type) {
+    override suspend fun items(type: Int): List<Item> = when (type) {
         T_LIVE -> read("&action=get_live_streams") { parseItems(it, T_LIVE, "stream_id", "stream_icon") }
         T_MOVIE -> read("&action=get_vod_streams") { parseItems(it, T_MOVIE, "stream_id", "stream_icon") }
         else -> read("&action=get_series") { parseItems(it, T_SERIES, "series_id", "cover") }
     }
 
-    suspend fun seriesInfo(id: String): SeriesDetail {
+    override suspend fun seriesInfo(id: String): SeriesDetail {
         val raw = text("&action=get_series_info&series_id=$id")
         return withContext(Dispatchers.Default) {
             val root = JSONObject(raw)
@@ -378,7 +389,7 @@ class Xtream(private val a: Account, private val ua: String) {
     }
 
     /** Now + next programmes for one channel (small, fast request). */
-    suspend fun shortEpg(id: String): List<Prog> = try {
+    override suspend fun shortEpg(id: String): List<Prog> = try {
         val raw = text("&action=get_short_epg&stream_id=$id&limit=3")
         val arr = JSONObject(raw).optJSONArray("epg_listings")
         val out = ArrayList<Prog>()
@@ -403,6 +414,25 @@ class Xtream(private val a: Account, private val ua: String) {
     } catch (e: Exception) {
         s
     }
+}
+
+class M3uSource(private val playlistUrl: String, private val ua: String) : Source {
+    private var cached: List<Item>? = null
+    private suspend fun load(): List<Item> = cached ?: withContext(Dispatchers.IO) {
+        val c = (URL(playlistUrl).openConnection() as HttpURLConnection).apply { connectTimeout=12000; readTimeout=45000; setRequestProperty("User-Agent",ua) }
+        try {
+            val out=ArrayList<Item>(); var info=""; var n=0
+            fun attr(k:String)=Regex("$k=\"([^\"]*)\"",RegexOption.IGNORE_CASE).find(info)?.groupValues?.get(1) ?: ""
+            c.inputStream.bufferedReader().forEachLine { raw -> val line=raw.trim(); if(line.startsWith("#EXTINF",true)) info=line else if(line.isNotBlank()&&!line.startsWith("#")&&info.isNotBlank()){ n++; val name=info.substringAfter(',',"Channel $n").trim(); val group=attr("group-title").ifBlank{"Live TV"}; out.add(Item(n.toString(),name,attr("tvg-logo").takeIf{it.isNotBlank()},group,T_LIVE,ext=line)); info="" } }
+            cached=out; out
+        } finally { c.disconnect() }
+    }
+    override suspend fun login(): AcctInfo { if(load().isEmpty()) error("The M3U playlist is empty or invalid"); return AcctInfo("Active","Playlist","1","0") }
+    override suspend fun categories(type:Int)=if(type==T_LIVE) load().map{it.cat}.distinct().map{Category(it,it)} else emptyList()
+    override suspend fun items(type:Int)=if(type==T_LIVE) load() else emptyList()
+    override suspend fun seriesInfo(id:String)=SeriesDetail("",emptyMap())
+    override suspend fun shortEpg(id:String)=emptyList<Prog>()
+    override fun url(item:Item,ts:Boolean)=item.ext
 }
 
 /** PIN + lock/hide lists, kept in their own prefs so signing out never clears them. */
@@ -436,7 +466,7 @@ class Vm(app: Application) : AndroidViewModel(app) {
     private val posSp = app.getSharedPreferences("nova_pos", 0)
     private val histSp = app.getSharedPreferences("nova_hist", 0)
     private val vault = Vault(app)
-    private var api: Xtream? = null
+    private var api: Source? = null
     private var job: Job? = null
     private val loadingSet = HashSet<Int>()
 
@@ -484,7 +514,7 @@ class Vm(app: Application) : AndroidViewModel(app) {
         if (posSp.all.size > 500) posSp.edit().clear().apply()
         viewModelScope.launch { while (true) { delay(60_000); now = System.currentTimeMillis() } }
         val h = sp.getString("h", null)
-        if (h != null) login(Account(h, sp.getString("u", "") ?: "", sp.getString("p", "") ?: ""))
+        if (h != null) login(Account(h, sp.getString("u", "") ?: "", sp.getString("p", "") ?: "", sp.getInt("kind",0)))
     }
 
     fun ua(): String = when (cfg.ua) {
@@ -498,7 +528,7 @@ class Vm(app: Application) : AndroidViewModel(app) {
         val uaChanged = c.ua != cfg.ua
         cfg = c
         saveCfg(cfgSp, c)
-        if (uaChanged) account?.let { api = Xtream(it, ua()) }
+        if (uaChanged) account?.let { api = if(it.kind==1) M3uSource(it.host,ua()) else Xtream(it, ua()) }
     }
 
     private fun run(block: suspend () -> Unit) {
@@ -512,11 +542,14 @@ class Vm(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    var startup by mutableStateOf(false); private set
+    var startupProgress by mutableIntStateOf(0); private set
     fun login(a: Account) = run {
-        val x = Xtream(a, ua())
+        startup=true; startupProgress=5
+        val x: Source = if(a.kind==1) M3uSource(a.host,ua()) else Xtream(a, ua())
         val i = x.login()
         api = x; account = a; info = i
-        sp.edit().putString("h", a.host).putString("u", a.user).putString("p", a.pass).apply()
+        sp.edit().putString("h", a.host).putString("u", a.user).putString("p", a.pass).putInt("kind", a.kind).apply()
         libs.clear(); errs.clear(); loadingSet.clear(); loadingTypes = emptySet()
         startLoading()
     }
@@ -562,7 +595,7 @@ class Vm(app: Application) : AndroidViewModel(app) {
             }
             val items = x.items(type)
             val lib = withContext(Dispatchers.Default) { buildLib(cats, items) }
-            if (api === x) libs[type] = lib
+            if (api === x) { libs[type] = lib; startupProgress=20+libs.size*25 }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Throwable) {
@@ -570,6 +603,7 @@ class Vm(app: Application) : AndroidViewModel(app) {
         } finally {
             loadingSet.remove(type)
             loadingTypes = loadingTypes - type
+            if(startup && loadingSet.isEmpty() && ((libs.size+errs.size)>=3 || (account?.kind==1 && libs.containsKey(T_LIVE)))) { startupProgress=100; delay(300); startup=false }
         }
     }
 

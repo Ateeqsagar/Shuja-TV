@@ -6,6 +6,8 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.*
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
@@ -33,6 +35,7 @@ import androidx.compose.ui.input.key.*
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -80,7 +83,7 @@ suspend fun FocusRequester.grab() {
 @Composable
 fun NovaApp(vm: Vm) {
     Box(Modifier.fillMaxSize().background(Bg)) {
-        if (vm.account == null) {
+        if (vm.startup) { StartupScreen(vm.startupProgress) } else if (vm.account == null) {
             LoginScreen(vm)
         } else {
             Home(vm)
@@ -106,6 +109,7 @@ fun Field(
     password: Boolean = false, ime: ImeAction = ImeAction.Next, onGo: (() -> Unit)? = null
 ) {
     var f by remember { mutableStateOf(false) }
+    val keyboard = LocalSoftwareKeyboardController.current
     BasicTextField(
         value = value, onValueChange = onChange, singleLine = true,
         textStyle = TextStyle(color = Color.White, fontSize = 18.sp),
@@ -113,7 +117,7 @@ fun Field(
         visualTransformation = if (password) PasswordVisualTransformation() else VisualTransformation.None,
         keyboardOptions = KeyboardOptions(imeAction = ime),
         keyboardActions = KeyboardActions(onSearch = { onGo?.invoke() }, onDone = { onGo?.invoke() }),
-        modifier = modifier.onFocusChanged { f = it.hasFocus },
+        modifier = modifier.onFocusChanged { f = it.hasFocus; if(it.hasFocus) keyboard?.show() }.clickable { keyboard?.show() },
         decorationBox = { inner ->
             Box(
                 Modifier.fillMaxWidth().clip(RoundedCornerShape(6.dp)).background(KeyBg)
@@ -258,10 +262,16 @@ fun MenuDialog(vm: Vm, m: MenuTarget) {
 // ---------------- screens ----------------
 
 @Composable
+fun StartupScreen(progress:Int) {
+    Box(Modifier.fillMaxSize().background(Bg),contentAlignment=Alignment.Center){ Column(horizontalAlignment=Alignment.CenterHorizontally,verticalArrangement=Arrangement.spacedBy(20.dp)){ Image(painterResource(R.drawable.logo),null,Modifier.size(132.dp),contentScale=ContentScale.Fit); Text("SHUJA TV",color=Red,fontSize=34.sp,fontWeight=FontWeight.Black); Text("Updating your content",color=Color.White,fontSize=22.sp,fontWeight=FontWeight.Bold); Text("Channels, movies, series and programme guide",color=Dim,fontSize=15.sp); Box(Modifier.width(360.dp).height(7.dp).clip(RoundedCornerShape(8.dp)).background(KeyBg)){ Box(Modifier.fillMaxWidth(progress.coerceIn(0,100)/100f).fillMaxHeight().background(Red)) }; Text("$progress%",color=Dim,fontSize=14.sp) } }
+}
+
+@Composable
 fun LoginScreen(vm: Vm) {
     var host by remember { mutableStateOf("") }
     var user by remember { mutableStateOf("") }
     var pass by remember { mutableStateOf("") }
+    var kind by remember { mutableIntStateOf(0) }
     Box(Modifier.fillMaxSize()) {
         Image(painter = painterResource(R.drawable.logo), contentDescription = null, modifier = Modifier.padding(32.dp).size(96.dp))
         Column(
@@ -270,14 +280,20 @@ fun LoginScreen(vm: Vm) {
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
             Text("Sign In", color = Color.White, fontSize = 32.sp, fontWeight = FontWeight.Bold)
-            Field(host, { host = it }, "Server  (http://host:port)")
-            Field(user, { user = it }, "Username")
-            Field(pass, { pass = it }, "Password", password = true, ime = ImeAction.Done)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                NavTab("Xtream Codes", kind == 0) { kind = 0 }
+                NavTab("M3U Playlist", kind == 1) { kind = 1 }
+            }
+            Field(host, { host = it }, if (kind == 0) "Server  (http://host:port)" else "M3U playlist URL")
+            if (kind == 0) {
+                Field(user, { user = it }, "Username")
+                Field(pass, { pass = it }, "Password", password = true, ime = ImeAction.Done)
+            }
             vm.error?.let { Text(it, color = Color(0xFFE87C03), fontSize = 16.sp) }
             Btn(if (vm.busy) "Connecting…" else "Sign In", Modifier.fillMaxWidth()) {
-                if (!vm.busy && host.isNotBlank() && user.isNotBlank()) vm.login(Account(host.trim(), user.trim(), pass))
+                if (!vm.busy && host.isNotBlank() && (kind == 1 || user.isNotBlank())) vm.login(Account(host.trim(), user.trim(), pass, kind))
             }
-            Text("Use the Xtream Codes details from your provider.", color = Dim, fontSize = 14.sp)
+            Text(if(kind==0) "Use the Xtream Codes details from your provider." else "Use an authorised remote M3U/M3U8 playlist URL.", color = Dim, fontSize = 14.sp)
         }
     }
 }
@@ -515,6 +531,7 @@ fun ShelfRow(vm: Vm, title: String, list: List<Item>, cont: List<Hist>? = null) 
 }
 
 /** OK = play / open. Long-press OK (or the Menu key) = favorites, lock and hide menu. */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun PosterCard(vm: Vm, item: Item, onClick: () -> Unit) {
     val cfg = vm.cfg
@@ -743,7 +760,8 @@ fun SettingsScreen(vm: Vm) {
                 item { SettingRow("Audio language", pick(AUDIO_NAMES, c.audio)) { vm.updateCfg(c.copy(audio = (c.audio + 1) % AUDIO_NAMES.size)) } }
                 item { SettingRow("Subtitles", onOff(c.subs)) { vm.updateCfg(c.copy(subs = !c.subs)) } }
                 item { SettingRow("Resume where you left off", onOff(c.resume)) { vm.updateCfg(c.copy(resume = !c.resume)) } }
-                item { SettingRow("Autoplay next episode", onOff(c.autoNext)) { vm.updateCfg(c.copy(autoNext = !c.autoNext)) } }
+                item { SettingRow("Seek forward/back", "${c.seekSeconds} seconds") { val v=listOf(5,10,15,30,60,120,300); val i=v.indexOf(c.seekSeconds).coerceAtLeast(0); vm.updateCfg(c.copy(seekSeconds=v[(i+1)%v.size])) } }
+            item { SettingRow("Autoplay next episode", onOff(c.autoNext)) { vm.updateCfg(c.copy(autoNext = !c.autoNext)) } }
                 item { SettingRow("Connect as (user agent)", pick(AGENTS, c.ua)) { vm.updateCfg(c.copy(ua = (c.ua + 1) % AGENTS.size)) } }
 
                 item { SectionTitle("Layout") }
