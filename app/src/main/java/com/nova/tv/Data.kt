@@ -184,7 +184,7 @@ class Vm(app: Application) : AndroidViewModel(app) {
         cache[live] = r to items
     }
 
-    fun setLive(v: Boolean) {
+    fun switchLive(v: Boolean) {
         if (v == live) return
         live = v
         run { refresh() }
