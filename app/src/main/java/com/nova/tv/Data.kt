@@ -2,8 +2,12 @@ package com.nova.tv
 
 import android.app.Application
 import android.content.Context
+import android.content.SharedPreferences
 import android.util.Base64
+import android.util.JsonReader
+import android.util.JsonToken
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
@@ -18,17 +22,56 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
-import org.json.JSONArray
+import org.json.JSONException
 import org.json.JSONObject
+import java.io.IOException
+import java.io.InputStreamReader
+import java.net.ConnectException
 import java.net.HttpURLConnection
+import java.net.SocketTimeoutException
 import java.net.URL
 import java.net.URLEncoder
+import java.net.UnknownHostException
 import java.security.MessageDigest
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import java.util.UUID
 
+const val T_LIVE = 0
+const val T_MOVIE = 1
+const val T_SERIES = 2
+const val T_EP = 3
+
+val AUDIO_CODES = listOf("", "en", "ar", "hi", "ur", "fr", "es", "de", "tr")
+val AUDIO_NAMES = listOf("Auto", "English", "Arabic", "Hindi", "Urdu", "French", "Spanish", "German", "Turkish")
+
 data class Account(val host: String, val user: String, val pass: String)
+data class AcctInfo(val status: String = "", val exp: String = "", val maxCons: String = "", val activeCons: String = "")
 data class Category(val id: String, val name: String)
-data class Item(val id: String, val name: String, val icon: String?, val url: String, val live: Boolean, val cat: String)
+
+/** Light-weight on purpose: tens of thousands of these live in memory. URLs are built on demand. */
+data class Item(
+    val id: String,
+    val name: String,
+    val icon: String?,
+    val cat: String,
+    val type: Int,
+    val ext: String = "",
+    val lc: String = name.lowercase()
+) {
+    val live: Boolean get() = type == T_LIVE
+}
+
+class Lib(
+    val rows: List<Pair<Category, List<Item>>>,
+    val all: List<Item>,
+    val adult: Set<String>,
+    val names: Map<String, String>
+)
+
+class SearchRes(val live: List<Item>, val movies: List<Item>, val series: List<Item>)
+class SeriesDetail(val plot: String, val eps: Map<Int, List<Item>>)
 
 /** One programme. start/end are epoch seconds. */
 data class Prog(val title: String, val start: Long, val end: Long)
@@ -40,63 +83,268 @@ data class Epg(val list: List<Prog>, val at: Long) {
 class PinReq(val title: String, val create: Boolean, val onOk: () -> Unit)
 class MenuTarget(val item: Item, val catId: String, val catName: String)
 
-class Xtream(private val a: Account) {
-    private val base = a.host.trim().let { if (it.startsWith("http")) it else "http://$it" }.trimEnd('/')
+data class Cfg(
+    val startTab: Int = 0,
+    val liveFormat: Int = 0,
+    val quality: Int = 0,
+    val buffer: Int = 1,
+    val aspect: Int = 0,
+    val audio: Int = 0,
+    val subs: Boolean = false,
+    val resume: Boolean = true,
+    val autoNext: Boolean = true,
+    val ua: Int = 0,
+    val sort: Int = 0,
+    val hero: Boolean = false,
+    val epg: Boolean = true,
+    val anim: Boolean = true,
+    val hideAdult: Boolean = false
+)
+
+fun loadCfg(sp: SharedPreferences): Cfg {
+    val d = Cfg()
+    return Cfg(
+        startTab = sp.getInt("startTab", d.startTab).coerceIn(0, 2),
+        liveFormat = sp.getInt("liveFormat", d.liveFormat).coerceIn(0, 1),
+        quality = sp.getInt("quality", d.quality).coerceIn(0, 2),
+        buffer = sp.getInt("buffer", d.buffer).coerceIn(0, 2),
+        aspect = sp.getInt("aspect", d.aspect).coerceIn(0, 2),
+        audio = sp.getInt("audio", d.audio).coerceIn(0, AUDIO_CODES.lastIndex),
+        subs = sp.getBoolean("subs", d.subs),
+        resume = sp.getBoolean("resume", d.resume),
+        autoNext = sp.getBoolean("autoNext", d.autoNext),
+        ua = sp.getInt("ua", d.ua).coerceIn(0, 3),
+        sort = sp.getInt("sort", d.sort).coerceIn(0, 1),
+        hero = sp.getBoolean("hero", d.hero),
+        epg = sp.getBoolean("epg", d.epg),
+        anim = sp.getBoolean("anim", d.anim),
+        hideAdult = sp.getBoolean("hideAdult", d.hideAdult)
+    )
+}
+
+fun saveCfg(sp: SharedPreferences, c: Cfg) {
+    sp.edit()
+        .putInt("startTab", c.startTab).putInt("liveFormat", c.liveFormat).putInt("quality", c.quality)
+        .putInt("buffer", c.buffer).putInt("aspect", c.aspect).putInt("audio", c.audio)
+        .putBoolean("subs", c.subs).putBoolean("resume", c.resume).putBoolean("autoNext", c.autoNext)
+        .putInt("ua", c.ua).putInt("sort", c.sort).putBoolean("hero", c.hero)
+        .putBoolean("epg", c.epg).putBoolean("anim", c.anim).putBoolean("hideAdult", c.hideAdult)
+        .apply()
+}
+
+private fun JSONObject.s(k: String): String {
+    val v = optString(k)
+    return if (v == "null") "" else v
+}
+
+private fun JsonReader.str(): String = when (peek()) {
+    JsonToken.STRING, JsonToken.NUMBER -> nextString()
+    else -> {
+        skipValue()
+        ""
+    }
+}
+
+private fun isAdult(name: String): Boolean {
+    val n = name.lowercase()
+    return n.contains("adult") || n.contains("xxx") || n.contains("porn") || n.contains("18+") || n.contains("erotic")
+}
+
+private fun parseItems(r: JsonReader, type: Int, idKey: String, iconKey: String): List<Item> {
+    if (r.peek() != JsonToken.BEGIN_ARRAY) {
+        r.skipValue()
+        return emptyList()
+    }
+    val out = ArrayList<Item>(4096)
+    r.beginArray()
+    while (r.hasNext()) {
+        if (r.peek() != JsonToken.BEGIN_OBJECT) {
+            r.skipValue()
+            continue
+        }
+        var id = ""
+        var name = ""
+        var icon = ""
+        var cat = ""
+        var ext = ""
+        r.beginObject()
+        while (r.hasNext()) {
+            val key = r.nextName()
+            when (key) {
+                idKey -> id = r.str()
+                "name" -> name = r.str()
+                iconKey -> icon = r.str()
+                "category_id" -> cat = r.str()
+                "container_extension" -> ext = r.str()
+                else -> r.skipValue()
+            }
+        }
+        r.endObject()
+        if (id.isNotEmpty()) {
+            val ic = if (icon.isNotBlank() && icon != "null") icon else null
+            out.add(Item(id, name.ifBlank { id }, ic, cat, type, ext))
+        }
+    }
+    r.endArray()
+    return out
+}
+
+class Xtream(private val a: Account, private val ua: String) {
+    val base = a.host.trim().let { if (it.startsWith("http")) it else "http://$it" }.trimEnd('/')
     private fun enc(s: String) = URLEncoder.encode(s, "UTF-8")
 
-    private suspend fun call(q: String): String = withContext(Dispatchers.IO) {
+    private fun open(q: String): HttpURLConnection {
         val c = URL("$base/player_api.php?username=${enc(a.user)}&password=${enc(a.pass)}$q")
             .openConnection() as HttpURLConnection
-        c.connectTimeout = 10_000
-        c.readTimeout = 40_000
-        c.setRequestProperty("User-Agent", "ShujaTV/1.0")
-        try { c.inputStream.bufferedReader().use { it.readText() } } finally { c.disconnect() }
+        c.connectTimeout = 12_000
+        c.readTimeout = 45_000
+        c.setRequestProperty("User-Agent", ua)
+        val code = c.responseCode
+        if (code !in 200..299) {
+            c.disconnect()
+            throw IOException("Server returned HTTP $code")
+        }
+        return c
     }
 
-    suspend fun login() {
-        val ui = JSONObject(call("")).optJSONObject("user_info") ?: error("Invalid server response")
-        if (ui.optInt("auth") != 1) error("Wrong username or password")
-        if (ui.optString("status").equals("Expired", true)) error("Subscription expired")
-    }
-
-    suspend fun categories(live: Boolean): List<Category> {
-        val arr = JSONArray(call("&action=get_${if (live) "live" else "vod"}_categories"))
-        return List(arr.length()) {
-            val o = arr.getJSONObject(it)
-            Category(o.optString("category_id"), o.optString("category_name"))
+    private suspend fun text(q: String): String = withContext(Dispatchers.IO) {
+        val c = open(q)
+        try {
+            c.inputStream.bufferedReader().use { it.readText() }
+        } finally {
+            c.disconnect()
         }
     }
 
-    suspend fun items(live: Boolean, cat: String): List<Item> {
-        val k = if (live) "live" else "vod"
-        val raw = call("&action=get_${k}_streams" + if (cat.isEmpty()) "" else "&category_id=$cat")
-        return withContext(Dispatchers.Default) {
-            val arr = JSONArray(raw)
-            List(arr.length()) {
-                val o = arr.getJSONObject(it)
-                val id = o.optString("stream_id")
-                val icon = o.optString("stream_icon").takeIf { s -> s.isNotBlank() && s != "null" }
-                val url = if (live) "$base/live/${a.user}/${a.pass}/$id.m3u8"
-                else "$base/movie/${a.user}/${a.pass}/$id.${o.optString("container_extension").ifBlank { "mp4" }}"
-                Item(id, o.optString("name"), icon, url, live, o.optString("category_id"))
+    /** Streams the JSON straight off the socket, so huge channel lists never sit in memory as one string or tree. */
+    private suspend fun <T> read(q: String, parse: (JsonReader) -> T): T = withContext(Dispatchers.IO) {
+        val c = open(q)
+        try {
+            JsonReader(InputStreamReader(c.inputStream, Charsets.UTF_8).buffered()).use { r ->
+                r.isLenient = true
+                parse(r)
             }
+        } finally {
+            c.disconnect()
+        }
+    }
+
+    fun url(item: Item, ts: Boolean): String = when (item.type) {
+        T_LIVE -> "$base/live/${a.user}/${a.pass}/${item.id}.${if (ts) "ts" else "m3u8"}"
+        T_MOVIE -> "$base/movie/${a.user}/${a.pass}/${item.id}.${item.ext.ifBlank { "mp4" }}"
+        else -> "$base/series/${a.user}/${a.pass}/${item.id}.${item.ext.ifBlank { "mp4" }}"
+    }
+
+    suspend fun login(): AcctInfo {
+        val ui = JSONObject(text("")).optJSONObject("user_info") ?: error("Invalid server response")
+        if (ui.optInt("auth") != 1) error("Wrong username or password")
+        val status = ui.s("status")
+        if (status.equals("Expired", true)) error("Subscription expired")
+        val exp = ui.s("exp_date").toLongOrNull()
+            ?.let { SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date(it * 1000)) } ?: "Unlimited"
+        return AcctInfo(status.ifBlank { "Active" }, exp, ui.s("max_connections"), ui.s("active_cons"))
+    }
+
+    suspend fun categories(type: Int): List<Category> {
+        val kind = when (type) {
+            T_LIVE -> "live"
+            T_MOVIE -> "vod"
+            else -> "series"
+        }
+        return read("&action=get_${kind}_categories") { r ->
+            val out = ArrayList<Category>()
+            if (r.peek() != JsonToken.BEGIN_ARRAY) {
+                r.skipValue()
+            } else {
+                r.beginArray()
+                while (r.hasNext()) {
+                    if (r.peek() != JsonToken.BEGIN_OBJECT) {
+                        r.skipValue()
+                        continue
+                    }
+                    var id = ""
+                    var name = ""
+                    r.beginObject()
+                    while (r.hasNext()) {
+                        when (r.nextName()) {
+                            "category_id" -> id = r.str()
+                            "category_name" -> name = r.str()
+                            else -> r.skipValue()
+                        }
+                    }
+                    r.endObject()
+                    if (id.isNotEmpty()) out.add(Category(id, name.ifBlank { "Category $id" }))
+                }
+                r.endArray()
+            }
+            out
+        }
+    }
+
+    suspend fun items(type: Int): List<Item> = when (type) {
+        T_LIVE -> read("&action=get_live_streams") { parseItems(it, T_LIVE, "stream_id", "stream_icon") }
+        T_MOVIE -> read("&action=get_vod_streams") { parseItems(it, T_MOVIE, "stream_id", "stream_icon") }
+        else -> read("&action=get_series") { parseItems(it, T_SERIES, "series_id", "cover") }
+    }
+
+    suspend fun seriesInfo(id: String): SeriesDetail {
+        val raw = text("&action=get_series_info&series_id=$id")
+        return withContext(Dispatchers.Default) {
+            val root = JSONObject(raw)
+            val plot = root.optJSONObject("info")?.s("plot") ?: ""
+            val epsObj = root.optJSONObject("episodes")
+            val map = LinkedHashMap<Int, List<Item>>()
+            if (epsObj != null) {
+                val keys = ArrayList<String>()
+                val ks = epsObj.keys()
+                while (ks.hasNext()) keys.add(ks.next())
+                keys.sortBy { k -> k.toIntOrNull() ?: Int.MAX_VALUE }
+                for (k in keys) {
+                    val arr = epsObj.optJSONArray(k) ?: continue
+                    val season = k.toIntOrNull() ?: 0
+                    val list = ArrayList<Item>()
+                    for (i in 0 until arr.length()) {
+                        val o = arr.optJSONObject(i) ?: continue
+                        val eid = o.s("id")
+                        if (eid.isEmpty()) continue
+                        val num = o.optInt("episode_num", i + 1)
+                        val title = o.s("title").ifBlank { "Episode $num" }
+                        val img = o.optJSONObject("info")?.s("movie_image")?.takeIf { s -> s.isNotBlank() }
+                        list.add(Item(eid, "E$num  $title", img, k, T_EP, o.s("container_extension").ifBlank { "mp4" }))
+                    }
+                    if (list.isNotEmpty()) map[season] = list
+                }
+            }
+            SeriesDetail(plot, map)
         }
     }
 
     /** Now + next programmes for one channel (small, fast request). */
     suspend fun shortEpg(id: String): List<Prog> = try {
-        val arr = JSONObject(call("&action=get_short_epg&stream_id=$id&limit=3")).optJSONArray("epg_listings")
-        if (arr == null) emptyList() else List(arr.length()) { arr.getJSONObject(it) }.mapNotNull { o ->
-            val s = o.optString("start_timestamp").toLongOrNull()
-            val e = o.optString("stop_timestamp").toLongOrNull()
-            if (s == null || e == null || e <= s) null else Prog(decode(o.optString("title")), s, e)
-        }.sortedBy { it.start }
-    } catch (e: CancellationException) { throw e } catch (e: Exception) { emptyList() }
+        val raw = text("&action=get_short_epg&stream_id=$id&limit=3")
+        val arr = JSONObject(raw).optJSONArray("epg_listings")
+        val out = ArrayList<Prog>()
+        if (arr != null) {
+            for (i in 0 until arr.length()) {
+                val o = arr.optJSONObject(i) ?: continue
+                val s = o.s("start_timestamp").toLongOrNull()
+                val e = o.s("stop_timestamp").toLongOrNull()
+                if (s != null && e != null && e > s) out.add(Prog(decode(o.s("title")), s, e))
+            }
+        }
+        out.sortedBy { it.start }
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        emptyList()
+    }
 
     private fun decode(s: String): String = try {
         val d = String(Base64.decode(s, Base64.DEFAULT), Charsets.UTF_8)
         if (d.isNotBlank() && !d.contains('\uFFFD') && d.none { it.isISOControl() && it != '\n' && it != '\t' }) d else s
-    } catch (e: Exception) { s }
+    } catch (e: Exception) {
+        s
+    }
 }
 
 /** PIN + lock/hide lists, kept in their own prefs so signing out never clears them. */
@@ -114,21 +362,45 @@ class Vault(ctx: Context) {
     fun put(name: String, v: Set<String>) { sp.edit().putStringSet(name, HashSet(v)).apply() }
 }
 
+fun friendly(e: Throwable): String = when (e) {
+    is OutOfMemoryError -> "Not enough memory on this device for that list."
+    is UnknownHostException -> "Can't find the server. Check the address."
+    is SocketTimeoutException -> "The server took too long to answer."
+    is ConnectException -> "Can't connect to the server."
+    is JSONException -> "The server sent an unexpected answer. Check the address."
+    else -> e.message ?: "Network error"
+}
+
 class Vm(app: Application) : AndroidViewModel(app) {
     private val sp = app.getSharedPreferences("nova", 0)
+    private val cfgSp = app.getSharedPreferences("nova_cfg", 0)
+    private val favSp = app.getSharedPreferences("nova_fav", 0)
+    private val posSp = app.getSharedPreferences("nova_pos", 0)
     private val vault = Vault(app)
     private var api: Xtream? = null
     private var job: Job? = null
-    private val cache = HashMap<Boolean, Pair<List<Pair<Category, List<Item>>>, List<Item>>>()
+    private val loadingSet = HashSet<Int>()
 
+    var cfg by mutableStateOf(loadCfg(cfgSp)); private set
     var account by mutableStateOf<Account?>(null); private set
+    var info by mutableStateOf(AcctInfo()); private set
     var busy by mutableStateOf(false); private set
     var error by mutableStateOf<String?>(null); private set
-    var live by mutableStateOf(true); private set
-    var rows by mutableStateOf(emptyList<Pair<Category, List<Item>>>()); private set
-    var all by mutableStateOf(emptyList<Item>()); private set
+    var tab by mutableIntStateOf(cfg.startTab); private set
     var query by mutableStateOf("")
+    val libs = mutableStateMapOf<Int, Lib>()
+    val errs = mutableStateMapOf<Int, String>()
+    var loadingTypes by mutableStateOf(setOf<Int>()); private set
     var playing by mutableStateOf<Pair<List<Item>, Int>?>(null); private set
+    var settingsOpen by mutableStateOf(false)
+
+    // ---- series detail ----
+    var detail by mutableStateOf<Item?>(null); private set
+    var detailInfo by mutableStateOf<SeriesDetail?>(null); private set
+    var detailErr by mutableStateOf<String?>(null); private set
+
+    // ---- favorites ----
+    var favKeys by mutableStateOf<Set<String>>(favSp.getStringSet("k", emptySet())?.toSet() ?: emptySet()); private set
 
     // ---- parental lock ----
     var lockedKeys by mutableStateOf(vault.get("lock")); private set
@@ -143,12 +415,27 @@ class Vm(app: Application) : AndroidViewModel(app) {
     var now by mutableLongStateOf(System.currentTimeMillis()); private set
     val epgMap = mutableStateMapOf<String, Epg>()
     private val inflight = HashSet<String>()
-    private val gate = Semaphore(6)
+    private val gate = Semaphore(3)
 
     init {
-        viewModelScope.launch { while (true) { delay(30_000); now = System.currentTimeMillis() } }
+        if (posSp.all.size > 500) posSp.edit().clear().apply()
+        viewModelScope.launch { while (true) { delay(60_000); now = System.currentTimeMillis() } }
         val h = sp.getString("h", null)
         if (h != null) login(Account(h, sp.getString("u", "") ?: "", sp.getString("p", "") ?: ""))
+    }
+
+    fun ua(): String = when (cfg.ua) {
+        1 -> "VLC/3.0.18 LibVLC/3.0.18"
+        2 -> "Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        3 -> "IPTVSmartersPro"
+        else -> "ShujaTV/1.1"
+    }
+
+    fun setCfg(c: Cfg) {
+        val uaChanged = c.ua != cfg.ua
+        cfg = c
+        saveCfg(cfgSp, c)
+        if (uaChanged) account?.let { api = Xtream(it, ua()) }
     }
 
     private fun run(block: suspend () -> Unit) {
@@ -157,59 +444,232 @@ class Vm(app: Application) : AndroidViewModel(app) {
             busy = true; error = null
             try { block() }
             catch (e: CancellationException) { throw e }
-            catch (e: Exception) { error = e.message ?: "Network error" }
+            catch (e: Throwable) { error = friendly(e) }
             finally { busy = false }
         }
     }
 
     fun login(a: Account) = run {
-        val x = Xtream(a)
-        x.login()
-        api = x; account = a
+        val x = Xtream(a, ua())
+        val i = x.login()
+        api = x; account = a; info = i
         sp.edit().putString("h", a.host).putString("u", a.user).putString("p", a.pass).apply()
-        refresh()
+        libs.clear(); errs.clear(); loadingSet.clear(); loadingTypes = emptySet()
+        startLoading()
     }
 
-    private suspend fun refresh() {
+    // ---- content loading ----
+    private fun startLoading() {
+        viewModelScope.launch {
+            loadLib(tab)
+            delay(1200)
+            for (t in 0..2) {
+                if (t != tab) { loadLib(t); delay(400) }
+            }
+        }
+    }
+
+    fun ensure(type: Int) {
+        if (libs.containsKey(type) || loadingSet.contains(type)) return
+        viewModelScope.launch { loadLib(type) }
+    }
+
+    fun reload(type: Int) {
+        libs.remove(type)
+        viewModelScope.launch { loadLib(type) }
+    }
+
+    fun refreshAll() {
+        libs.clear(); errs.clear(); epgMap.clear()
+        startLoading()
+    }
+
+    private suspend fun loadLib(type: Int) {
         val x = api ?: return
-        query = ""
-        cache[live]?.let { rows = it.first; all = it.second; return }
-        rows = emptyList(); all = emptyList()
-        val cats = x.categories(live)
-        val items = x.items(live, "")
-        val grouped = withContext(Dispatchers.Default) { items.groupBy { it.cat } }
-        var r = cats.mapNotNull { c -> grouped[c.id]?.takeIf { it.isNotEmpty() }?.let { c to it } }
-        if (r.isEmpty() && items.isNotEmpty()) r = listOf(Category("", "All") to items)
-        rows = r; all = items
-        cache[live] = r to items
+        if (libs.containsKey(type) || !loadingSet.add(type)) return
+        loadingTypes = loadingTypes + type
+        try {
+            errs.remove(type)
+            val cats = try {
+                x.categories(type)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                emptyList()
+            }
+            val items = x.items(type)
+            val lib = withContext(Dispatchers.Default) { buildLib(cats, items) }
+            if (api === x) libs[type] = lib
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            if (api === x) errs[type] = friendly(e)
+        } finally {
+            loadingSet.remove(type)
+            loadingTypes = loadingTypes - type
+        }
     }
 
-    fun switchLive(v: Boolean) {
-        if (v == live) return
-        live = v
-        run { refresh() }
+    private fun buildLib(cats: List<Category>, items: List<Item>): Lib {
+        val grouped = items.groupBy { it.cat }
+        val known = HashSet<String>()
+        for (c in cats) known.add(c.id)
+        val rows = ArrayList<Pair<Category, List<Item>>>()
+        for (c in cats) {
+            val l = grouped[c.id]
+            if (l != null && l.isNotEmpty()) rows.add(c to l)
+        }
+        val orphans = items.filter { it.cat !in known }
+        if (orphans.isNotEmpty()) rows.add(Category("", if (rows.isEmpty()) "All" else "Other") to orphans)
+        val adult = HashSet<String>()
+        for (c in cats) if (isAdult(c.name)) adult.add(c.id)
+        val names = HashMap<String, String>()
+        for (c in cats) names[c.id] = c.name
+        return Lib(rows, items, adult, names)
+    }
+
+    fun setTab(t: Int) {
+        if (t == tab) return
+        tab = t
+        ensure(t)
     }
 
     fun logout() {
         job?.cancel()
         sp.edit().clear().apply()
-        api = null; account = null; cache.clear(); rows = emptyList(); all = emptyList(); error = null
-        playing = null; unlocked = false; epgMap.clear()
+        api = null; account = null; info = AcctInfo()
+        libs.clear(); errs.clear(); loadingSet.clear(); loadingTypes = emptySet()
+        playing = null; detail = null; detailInfo = null; settingsOpen = false
+        unlocked = false; epgMap.clear(); query = ""; error = null; menu = null; pinReq = null
+    }
+
+    // ---- rows / search ----
+    fun rowsFor(lib: Lib, type: Int): List<Pair<Category, List<Item>>> {
+        val hideA = cfg.hideAdult
+        val hid = hiddenKeys
+        val filterHidden = !unlocked && hid.isNotEmpty()
+        val sorted = cfg.sort == 1
+        val out = ArrayList<Pair<Category, List<Item>>>(lib.rows.size)
+        for ((c, l) in lib.rows) {
+            if (hideA && c.id in lib.adult) continue
+            if (filterHidden && catKey(type, c.id) in hid) continue
+            var list = if (filterHidden) l.filter { itemKey(it) !in hid } else l
+            if (list.isEmpty()) continue
+            if (sorted) list = list.sortedBy { it.lc }
+            out.add(c to list)
+        }
+        return out
+    }
+
+    private fun passes(i: Item, lib: Lib): Boolean {
+        if (cfg.hideAdult && i.cat in lib.adult) return false
+        if (!unlocked && isHidden(i)) return false
+        return true
+    }
+
+    fun favItems(lib: Lib): List<Item> {
+        val keys = favKeys
+        if (keys.isEmpty()) return emptyList()
+        return lib.all.filter { itemKey(it) in keys && passes(it, lib) }
+    }
+
+    fun search(q: String): SearchRes {
+        val toks = q.trim().lowercase().split(' ').filter { it.isNotEmpty() }
+        if (toks.isEmpty()) return SearchRes(emptyList(), emptyList(), emptyList())
+        fun find(type: Int): List<Item> {
+            val lib = libs[type] ?: return emptyList()
+            val out = ArrayList<Item>()
+            for (item in lib.all) {
+                val n = item.lc
+                var ok = true
+                for (t in toks) {
+                    if (!n.contains(t)) { ok = false; break }
+                }
+                if (ok && passes(item, lib)) {
+                    out.add(item)
+                    if (out.size >= 150) break
+                }
+            }
+            return if (out.size > 1) out.sortedByDescending { it.lc.startsWith(toks[0]) } else out
+        }
+        return SearchRes(find(T_LIVE), find(T_MOVIE), find(T_SERIES))
     }
 
     // ---- playback ----
+    fun urlOf(item: Item, ts: Boolean = false): String = api?.url(item, ts) ?: ""
+
+    fun open(list: List<Item>, i: Int) {
+        if (i !in list.indices) return
+        val item = list[i]
+        if (item.type == T_SERIES) openSeries(item) else play(list, i)
+    }
+
     fun play(list: List<Item>, i: Int) {
+        if (i !in list.indices) return
         val item = list[i]
         if (!unlocked && isLocked(item)) askPin("Enter PIN to watch") { playing = list to i } else playing = list to i
     }
     fun stop() { playing = null }
 
+    fun resumeAt(item: Item): Long = if (cfg.resume && !item.live) posSp.getLong(itemKey(item), 0L) else 0L
+
+    fun savePos(item: Item, pos: Long, dur: Long) {
+        if (item.live || !cfg.resume) return
+        val k = itemKey(item)
+        val e = posSp.edit()
+        if (dur > 0 && pos > 15_000 && pos < dur - 45_000) e.putLong(k, pos) else e.remove(k)
+        e.apply()
+    }
+
+    fun clearResume() { posSp.edit().clear().apply() }
+
+    // ---- series ----
+    fun openSeries(item: Item) {
+        if (!unlocked && isLocked(item)) askPin("Enter PIN to open") { loadSeries(item) } else loadSeries(item)
+    }
+
+    private fun loadSeries(item: Item) {
+        val x = api ?: return
+        detail = item; detailInfo = null; detailErr = null
+        viewModelScope.launch {
+            try {
+                val d = x.seriesInfo(item.id)
+                if (detail?.id == item.id) detailInfo = d
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                if (detail?.id == item.id) detailErr = friendly(e)
+            }
+        }
+    }
+
+    fun closeDetail() { detail = null; detailInfo = null; detailErr = null }
+
+    // ---- favorites ----
+    fun toggleFav(item: Item) {
+        val k = itemKey(item)
+        val nv = if (k in favKeys) favKeys - k else favKeys + k
+        favKeys = nv
+        favSp.edit().putStringSet("k", HashSet(nv)).apply()
+        menu = null
+    }
+
+    fun clearFavs() {
+        favKeys = emptySet()
+        favSp.edit().remove("k").apply()
+    }
+
     // ---- lock / hide ----
-    fun itemKey(i: Item) = "i:${i.live}:${i.id}"
-    fun catKey(live: Boolean, id: String) = "c:$live:$id"
-    fun isLocked(i: Item) = itemKey(i) in lockedKeys || catKey(i.live, i.cat) in lockedKeys
-    fun isHidden(i: Item) = itemKey(i) in hiddenKeys || catKey(i.live, i.cat) in hiddenKeys
-    fun visible(list: List<Item>) = if (unlocked) list else list.filter { !isHidden(it) }
+    fun itemKey(i: Item) = "i:${i.type}:${i.id}"
+    fun catKey(type: Int, id: String) = "c:$type:$id"
+    fun isLocked(i: Item): Boolean {
+        if (lockedKeys.isEmpty()) return false
+        return itemKey(i) in lockedKeys || catKey(i.type, i.cat) in lockedKeys
+    }
+    fun isHidden(i: Item): Boolean {
+        if (hiddenKeys.isEmpty()) return false
+        return itemKey(i) in hiddenKeys || catKey(i.type, i.cat) in hiddenKeys
+    }
 
     fun askPin(title: String, onOk: () -> Unit) { pinReq = PinReq(title, !vault.hasPin(), onOk) }
     fun cancelPin() { pinReq = null }
@@ -235,7 +695,24 @@ class Vm(app: Application) : AndroidViewModel(app) {
     fun toggleUnlock() { if (unlocked) unlocked = false else askPin("Enter PIN to unlock") { unlocked = true } }
     fun relock() { unlocked = false }
 
-    fun openMenu(i: Item, catName: String) { menu = MenuTarget(i, i.cat, catName) }
+    fun changePin() {
+        if (vault.hasPin()) askPin("Enter current PIN") { pinReq = PinReq("Create a new 4-digit PIN", true) {} }
+        else pinReq = PinReq("Create a 4-digit PIN", true) {}
+    }
+
+    fun clearLocks() {
+        if (lockedKeys.isEmpty()) return
+        guard { vault.put("lock", emptySet()); lockedKeys = emptySet() }
+    }
+
+    fun clearHidden() {
+        if (hiddenKeys.isEmpty()) return
+        guard { vault.put("hide", emptySet()); hiddenKeys = emptySet() }
+    }
+
+    fun openMenu(i: Item) {
+        menu = MenuTarget(i, i.cat, libs[i.type]?.names?.get(i.cat) ?: "this category")
+    }
     fun closeMenu() { menu = null }
 
     private fun guard(block: () -> Unit) { if (unlocked) block() else askPin("Enter PIN") { block() } }
@@ -256,10 +733,10 @@ class Vm(app: Application) : AndroidViewModel(app) {
         if (name == "lock") lockedKeys = nv else hiddenKeys = nv
     }
 
-    // ---- EPG: lazy, cached until the current programme ends, 6 requests in parallel ----
+    // ---- EPG: only for the focused channel / the playing channel, cached until the programme ends ----
     suspend fun loadEpg(item: Item) {
         val x = api ?: return
-        if (!item.live) return
+        if (!item.live || !cfg.epg) return
         val t = System.currentTimeMillis()
         val cur = epgMap[item.id]
         if (cur != null && fresh(cur, t)) return
