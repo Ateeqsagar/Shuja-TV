@@ -73,8 +73,14 @@ val Light = Color(0xFFE5E5E5)
 val KeyBg = Color(0xFF333333)
 val RedBrush: Brush = SolidColor(Red)
 
+/** Frosted-glass look shared by every popup: see-through (about 80%) so the screen behind still shows. */
+val GlassBrush: Brush = Brush.verticalGradient(listOf(Color(0xCC2B1426), Color(0xCC101015)))
+val GlassBtn = Color.White.copy(alpha = 0.13f)
+fun Modifier.glass(radius: Dp = 16.dp): Modifier =
+    this.clip(RoundedCornerShape(radius)).background(GlassBrush).border(1.dp, Color.White.copy(alpha = 0.16f), RoundedCornerShape(radius))
+
 /** A titled group of items: a category, or a special row such as Continue Watching. cont is set only for Continue Watching. */
-class Section(val title: String, val items: List<Item>, val cont: List<Hist>? = null)
+class Section(val title: String, val items: List<Item>, val cont: List<Hist>? = null, val pinned: Boolean = false, val catId: String = "")
 
 /** Focus can race the first layout of a new window; retry briefly instead of crashing. */
 suspend fun FocusRequester.grab() {
@@ -134,6 +140,7 @@ fun NovaApp(vm: Vm, onExit: () -> Unit) {
         }
         vm.pinReq?.let { r -> PinDialog(r.create, r.title, { vm.submitPin(it) }) { vm.cancelPin() } }
         vm.menu?.let { m -> MenuDialog(vm, m) }
+        vm.groupMenu?.let { g -> GroupMenuDialog(vm, g) }
         vm.resumeReq?.let { r -> ResumeDialog(vm, r) }
         if (vm.exitAsk) ExitDialog(vm, onExit)
     }
@@ -314,8 +321,7 @@ fun PinDialog(create: Boolean, title: String, onSubmit: (String) -> String?, onD
 
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Column(
-            Modifier.width(360.dp).clip(RoundedCornerShape(10.dp)).background(Color(0xFF181818))
-                .border(1.dp, KeyBg, RoundedCornerShape(10.dp)).padding(28.dp)
+            Modifier.width(360.dp).glass(10.dp).padding(28.dp)
                 .safeDpad()
                 .onPreviewKeyEvent { e ->
                     val c = e.utf16CodePoint
@@ -338,7 +344,7 @@ fun PinDialog(create: Boolean, title: String, onSubmit: (String) -> String?, onD
                     row.forEachIndexed { c, k ->
                         Btn(
                             k, Modifier.width(92.dp).then(if (r == 0 && c == 0) Modifier.focusRequester(fr) else Modifier),
-                            fill = KeyBg, fontSize = if (k.length > 1) 16.sp else 22.sp, hPad = 4.dp
+                            fill = GlassBtn, fontSize = if (k.length > 1) 16.sp else 22.sp, hPad = 4.dp
                         ) {
                             when (k) { "Del" -> entry = entry.dropLast(1); "Cancel" -> onDismiss(); else -> push(k) }
                         }
@@ -367,8 +373,7 @@ fun ResumeDialog(vm: Vm, r: ResumeReq) {
     val at = formatTime(r.posMs)
     Dialog(onDismissRequest = { vm.cancelResume() }, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Column(
-            Modifier.width(500.dp).clip(RoundedCornerShape(14.dp)).background(Color(0xFF181818))
-                .border(1.dp, KeyBg, RoundedCornerShape(14.dp)).padding(32.dp).safeDpad(),
+            Modifier.width(500.dp).glass(14.dp).padding(32.dp).safeDpad(),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             Text("RESUME PLAYBACK", color = Red, fontSize = 13.sp, fontWeight = FontWeight.Bold, letterSpacing = 2.sp)
@@ -379,8 +384,8 @@ fun ResumeDialog(vm: Vm, r: ResumeReq) {
             )
             Spacer(Modifier.height(4.dp))
             Btn("Resume from $at", Modifier.fillMaxWidth().focusRequester(fr)) { vm.chooseResume(r, false) }
-            Btn("Start from Beginning", Modifier.fillMaxWidth(), fill = KeyBg) { vm.chooseResume(r, true) }
-            Btn("Cancel", Modifier.fillMaxWidth(), fill = Color(0xFF222222), fontSize = 18.sp) { vm.cancelResume() }
+            Btn("Start from Beginning", Modifier.fillMaxWidth(), fill = GlassBtn) { vm.chooseResume(r, true) }
+            Btn("Cancel", Modifier.fillMaxWidth(), fill = Color.White.copy(.07f), fontSize = 18.sp) { vm.cancelResume() }
             LaunchedEffect(Unit) { fr.grab() }
         }
     }
@@ -391,8 +396,7 @@ fun ExitDialog(vm: Vm, onExit: () -> Unit) {
     val fr = remember { FocusRequester() }
     Dialog(onDismissRequest = { vm.exitAsk = false }, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Column(
-            Modifier.width(460.dp).clip(RoundedCornerShape(14.dp)).background(Color(0xFF181818))
-                .border(1.dp, KeyBg, RoundedCornerShape(14.dp)).padding(32.dp).safeDpad(),
+            Modifier.width(460.dp).glass(14.dp).padding(32.dp).safeDpad(),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
@@ -404,7 +408,7 @@ fun ExitDialog(vm: Vm, onExit: () -> Unit) {
             )
             Spacer(Modifier.height(6.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                Btn("Cancel", Modifier.focusRequester(fr), fill = KeyBg, hPad = 36.dp) { vm.exitAsk = false }
+                Btn("Cancel", Modifier.focusRequester(fr), fill = GlassBtn, hPad = 36.dp) { vm.exitAsk = false }
                 Btn("Exit", hPad = 44.dp) {
                     vm.exitAsk = false
                     onExit()
@@ -428,20 +432,56 @@ fun MenuDialog(vm: Vm, m: MenuTarget) {
     }
     Dialog(onDismissRequest = { vm.closeMenu() }, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Column(
-            Modifier.width(440.dp).clip(RoundedCornerShape(10.dp)).background(Color(0xFF181818))
-                .border(1.dp, KeyBg, RoundedCornerShape(10.dp)).padding(28.dp).safeDpad(),
+            Modifier.width(440.dp).glass(10.dp).padding(28.dp).safeDpad(),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             Text(m.item.name, color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Btn(if (ik in vm.favKeys) "Remove from favorites" else "Add to favorites", Modifier.fillMaxWidth().focusRequester(fr), fill = KeyBg) { vm.toggleFav(m.item) }
-            Btn(if (ik in vm.lockedKeys) "Unlock $noun (PIN)" else "Lock $noun", Modifier.fillMaxWidth(), fill = KeyBg) { vm.toggleLock(ik) }
-            Btn(if (ik in vm.hiddenKeys) "Unhide $noun" else "Hide $noun", Modifier.fillMaxWidth(), fill = KeyBg) { vm.toggleHide(ik) }
-            Btn(if (ck in vm.lockedKeys) "Unlock category: ${m.catName}" else "Lock category: ${m.catName}", Modifier.fillMaxWidth(), fill = KeyBg, fontSize = 18.sp) { vm.toggleLock(ck) }
-            Btn(if (ck in vm.hiddenKeys) "Unhide category: ${m.catName}" else "Hide category: ${m.catName}", Modifier.fillMaxWidth(), fill = KeyBg, fontSize = 18.sp) { vm.toggleHide(ck) }
-            Btn("Close", Modifier.fillMaxWidth(), fill = Color(0xFF222222)) { vm.closeMenu() }
+            Btn(if (ik in vm.favKeys) "Remove from favorites" else "Add to favorites", Modifier.fillMaxWidth().focusRequester(fr), fill = GlassBtn) { vm.toggleFav(m.item) }
+            Btn(if (ck in vm.pinKeys) "Unpin group: ${m.catName}" else "Pin group to top: ${m.catName}", Modifier.fillMaxWidth(), fill = GlassBtn, fontSize = 18.sp) { vm.togglePin(ck) }
+            Btn(if (ik in vm.lockedKeys) "Unlock $noun (PIN)" else "Lock $noun", Modifier.fillMaxWidth(), fill = GlassBtn) { vm.toggleLock(ik) }
+            Btn(if (ik in vm.hiddenKeys) "Unhide $noun" else "Hide $noun", Modifier.fillMaxWidth(), fill = GlassBtn) { vm.toggleHide(ik) }
+            Btn(if (ck in vm.lockedKeys) "Unlock category: ${m.catName}" else "Lock category: ${m.catName}", Modifier.fillMaxWidth(), fill = GlassBtn, fontSize = 18.sp) { vm.toggleLock(ck) }
+            Btn(if (ck in vm.hiddenKeys) "Unhide category: ${m.catName}" else "Hide category: ${m.catName}", Modifier.fillMaxWidth(), fill = GlassBtn, fontSize = 18.sp) { vm.toggleHide(ck) }
+            Btn("Close", Modifier.fillMaxWidth(), fill = Color.White.copy(.07f)) { vm.closeMenu() }
             LaunchedEffect(Unit) { fr.grab() }
         }
     }
+}
+
+@Composable
+fun GroupMenuDialog(vm: Vm, g: GroupTarget) {
+    val fr = remember { FocusRequester() }
+    val key = vm.catKey(g.type, g.catId)
+    val pinned = key in vm.pinKeys
+    Dialog(onDismissRequest = { vm.closeGroupMenu() }, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Column(
+            Modifier.width(440.dp).glass(16.dp).padding(28.dp).safeDpad(),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Text("GROUP", color = Red, fontSize = 13.sp, fontWeight = FontWeight.Bold, letterSpacing = 2.sp)
+            Text(g.name, color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            Text(
+                if (pinned) "This group is pinned and appears at the top of the list."
+                else "Pin this group to keep it at the top, so you never need to scroll to find it. You can pin as many groups as you like.",
+                color = Dim, fontSize = 15.sp
+            )
+            Spacer(Modifier.height(2.dp))
+            Btn(if (pinned) "Unpin group" else "Pin group to top", Modifier.fillMaxWidth().focusRequester(fr)) { vm.togglePin(key) }
+            Btn("Close", Modifier.fillMaxWidth(), fill = Color.White.copy(.07f), fontSize = 18.sp) { vm.closeGroupMenu() }
+            LaunchedEffect(Unit) { fr.grab() }
+        }
+    }
+}
+
+/** Small touch button beside a group title. */
+@Composable
+fun PinPill(pinned: Boolean, onClick: () -> Unit) {
+    Text(
+        if (pinned) "Unpin" else "Pin to top", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold,
+        modifier = Modifier.clip(RoundedCornerShape(50)).background(Color.White.copy(.14f))
+            .border(1.dp, Color.White.copy(.25f), RoundedCornerShape(50))
+            .clickable(onClick = onClick).padding(horizontal = 12.dp, vertical = 5.dp)
+    )
 }
 
 // ---------------- screens ----------------
@@ -565,12 +605,15 @@ fun Home(vm: Vm) {
     val recent = remember(lib, tab, cfg.recentRow, vm.hiddenKeys, vm.unlocked, cfg.hideAdult) {
         if (lib == null || tab == T_LIVE) emptyList<Item>() else vm.recentFor(lib)
     }
-    val sections = remember(cont, recent, favs, rows) {
+    val pins = vm.pinKeys
+    val sections = remember(cont, recent, favs, rows, pins) {
         val out = ArrayList<Section>()
         if (cont.isNotEmpty()) out.add(Section("Continue Watching", cont.map { vm.contItem(it) }, cont))
+        // Pinned groups come first, right after Continue Watching.
+        for ((c, l) in rows) if (vm.catKey(tab, c.id) in pins) out.add(Section(c.name, l, null, true, c.id))
         if (recent.isNotEmpty()) out.add(Section("Recently Added", recent))
         if (favs.isNotEmpty()) out.add(Section("Favorites", favs))
-        for ((c, l) in rows) out.add(Section(c.name, l))
+        for ((c, l) in rows) if (vm.catKey(tab, c.id) !in pins) out.add(Section(c.name, l, null, false, c.id))
         out
     }
 
@@ -646,22 +689,28 @@ fun Shelves(vm: Vm, sections: List<Section>, heroSrc: Pair<Category, List<Item>>
         if (heroList != null && heroItem != null) {
             item { Hero(heroItem, heroList.first.name) { vm.open(heroList.second, heroList.second.indexOf(heroItem)) } }
         }
-        items(sections) { sec -> ShelfRow(vm, sec.title, sec.items, sec.cont) }
+        items(sections) { sec -> ShelfRow(vm, sec.title, sec.items, sec.cont, sec.pinned, sec.catId) }
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun CatRow(title: String, count: Int, selected: Boolean, onFocus: () -> Unit, onClick: () -> Unit) {
+fun CatRow(title: String, count: Int, selected: Boolean, pinned: Boolean, onMenu: () -> Unit, onFocus: () -> Unit, onClick: () -> Unit) {
+    val tv = rememberIsTv()
     var f by remember { mutableStateOf(false) }
     Row(
         Modifier.fillMaxWidth().clip(RoundedCornerShape(6.dp))
             .background(if (f) Color.White else if (selected) KeyBg else Color.Transparent)
             .onFocusChanged { f = it.hasFocus; if (it.hasFocus) onFocus() }
-            .clickable(onClick = onClick).padding(horizontal = 14.dp, vertical = 10.dp),
+            // Remote: Menu key. Touch: press and hold. Both open the pin menu.
+            .onPreviewKeyEvent { e -> if (e.type == KeyEventType.KeyDown && e.key == Key.Menu) { onMenu(); true } else false }
+            .combinedClickable(onClick = onClick, onLongClick = if (tv) null else onMenu)
+            .padding(horizontal = 14.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         Text(title, color = if (f) Color.Black else if (selected) Color.White else Dim, fontSize = 17.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+        if (pinned) Tag("PIN", Red)
         Text("$count", color = if (f) Color(0xFF333333) else Dim, fontSize = 13.sp, maxLines = 1)
     }
 }
@@ -691,7 +740,11 @@ fun GridLayout(vm: Vm, sections: List<Section>) {
             verticalArrangement = Arrangement.spacedBy(3.dp)
         ) {
             itemsIndexed(sections) { i, s ->
-                CatRow(s.title, s.items.size, i == cur, { sel = i }) { fm.moveFocus(FocusDirection.Right) }
+                CatRow(
+                    s.title, s.items.size, i == cur, s.pinned,
+                    { if (s.catId.isNotEmpty()) vm.openGroupMenu(vm.tab, s.catId, s.title) },
+                    { sel = i }
+                ) { fm.moveFocus(FocusDirection.Right) }
             }
         }
         LazyVerticalGrid(
@@ -759,9 +812,18 @@ fun Hero(item: Item, label: String, onPlay: () -> Unit) {
 }
 
 @Composable
-fun ShelfRow(vm: Vm, title: String, list: List<Item>, cont: List<Hist>? = null) {
+fun ShelfRow(vm: Vm, title: String, list: List<Item>, cont: List<Hist>? = null, pinned: Boolean = false, catId: String = "") {
+    val tv = rememberIsTv()
     Column {
-        Text(title, color = Light, fontSize = 22.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(start = 48.dp, end = 48.dp, top = 8.dp))
+        Row(
+            Modifier.padding(start = 48.dp, end = 48.dp, top = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Text(title, color = Light, fontSize = 22.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+            if (pinned) Tag("PINNED", Red)
+            if (!tv && catId.isNotEmpty()) PinPill(pinned) { vm.togglePin(vm.catKey(vm.tab, catId)) }
+        }
         LazyRow(
             contentPadding = PaddingValues(horizontal = 48.dp, vertical = 18.dp),
             horizontalArrangement = Arrangement.spacedBy(12.dp)
@@ -1197,6 +1259,7 @@ fun SettingsScreen(vm: Vm) {
                 item { SettingRow("Remove all locks", "${vm.lockedKeys.size} locked") { vm.clearLocks() } }
                 item { SettingRow("Unhide everything", "${vm.hiddenKeys.size} hidden") { vm.clearHidden() } }
                 item { SettingRow("Clear favorites", "${vm.favKeys.size} saved") { vm.clearFavs(); toast("Favorites cleared") } }
+                item { SettingRow("Unpin all groups", "${vm.pinKeys.size} pinned") { vm.clearPins(); toast("Pinned groups cleared") } }
 
                 item { SectionTitle("Storage and diagnostics") }
                 item {

@@ -96,6 +96,9 @@ class ResumeReq(val list: List<Item>, val index: Int, val posMs: Long)
 class PinReq(val title: String, val create: Boolean, val onOk: () -> Unit)
 class MenuTarget(val item: Item, val catId: String, val catName: String)
 
+/** A group (category) picked for the pin menu. */
+class GroupTarget(val type: Int, val catId: String, val name: String)
+
 data class Cfg(
     val startTab: Int = 0,
     val liveFormat: Int = 0,
@@ -540,6 +543,10 @@ class Vm(app: Application) : AndroidViewModel(app) {
 
     // ---- favorites ----
     var favKeys by mutableStateOf<Set<String>>(favSp.getStringSet("k", emptySet())?.toSet() ?: emptySet()); private set
+
+    // ---- pinned groups (shown at the top of Live TV, Movies and Series) ----
+    var pinKeys by mutableStateOf<Set<String>>(favSp.getStringSet("pins", emptySet())?.toSet() ?: emptySet()); private set
+    var groupMenu by mutableStateOf<GroupTarget?>(null); private set
 
     // ---- parental lock ----
     var lockedKeys by mutableStateOf(vault.get("lock")); private set
@@ -1027,6 +1034,22 @@ class Vm(app: Application) : AndroidViewModel(app) {
         favKeys = emptySet()
         favSp.edit().remove("k").apply()
     }
+
+    fun togglePin(key: String) {
+        val nv = if (key in pinKeys) pinKeys - key else pinKeys + key
+        pinKeys = nv
+        favSp.edit().putStringSet("pins", HashSet(nv)).apply()
+        menu = null
+        groupMenu = null
+    }
+
+    fun clearPins() {
+        pinKeys = emptySet()
+        favSp.edit().remove("pins").apply()
+    }
+
+    fun openGroupMenu(type: Int, catId: String, name: String) { groupMenu = GroupTarget(type, catId, name) }
+    fun closeGroupMenu() { groupMenu = null }
 
     // ---- lock / hide ----
     fun itemKey(i: Item) = "i:${i.type}:${i.id}"

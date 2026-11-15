@@ -697,7 +697,7 @@ private fun GearIcon(modifier: Modifier = Modifier, tint: Color = Color.White) {
 private fun OptRow(label: String, value: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
     var f by remember { mutableStateOf(false) }
     Row(
-        modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(if (f) Color.White else Color(0xFF242424))
+        modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(if (f) Color.White else Color.White.copy(.10f))
             .onFocusChanged { f = it.hasFocus }.clickable(onClick = onClick).padding(horizontal = 18.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(14.dp)
@@ -760,8 +760,7 @@ private fun PlayerSettings(
         properties = DialogProperties(usePlatformDefaultWidth = false)
     ) {
         Column(
-            Modifier.width(480.dp).clip(RoundedCornerShape(16.dp)).background(Color(0xFF181818))
-                .border(1.dp, KeyBg, RoundedCornerShape(16.dp)).padding(26.dp).safeDpad(),
+            Modifier.width(480.dp).glass(16.dp).padding(26.dp).safeDpad(),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
