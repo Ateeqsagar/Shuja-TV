@@ -6,6 +6,13 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.os.Process
+import coil.ImageLoader
+import coil.ImageLoaderFactory
+import coil.disk.DiskCache
+import coil.memory.MemoryCache
+import okhttp3.Dispatcher
+import okhttp3.OkHttpClient
+import java.util.concurrent.TimeUnit
 import java.io.PrintWriter
 import java.io.StringWriter
 import kotlin.system.exitProcess
@@ -15,7 +22,22 @@ import kotlin.system.exitProcess
  * and the app relaunches itself instead of leaving the TV on the home screen.
  * A 20 second guard prevents restart loops.
  */
-class App : Application() {
+class App : Application(), ImageLoaderFactory {
+    /** Lighter image loading: smaller memory cache (no GC stalls on TVs with little RAM), disk cache, no fade. */
+    override fun newImageLoader(): ImageLoader {
+        val http = OkHttpClient.Builder()
+            .dispatcher(Dispatcher().apply { maxRequests = 24; maxRequestsPerHost = 8 })
+            .connectTimeout(8, TimeUnit.SECONDS).readTimeout(12, TimeUnit.SECONDS).build()
+        return ImageLoader.Builder(this)
+            .okHttpClient(http)
+            .memoryCache { MemoryCache.Builder(this).maxSizePercent(0.15).build() }
+            .diskCache { DiskCache.Builder().directory(cacheDir.resolve("img")).maxSizeBytes(200L * 1024 * 1024).build() }
+            .allowRgb565(true)
+            .crossfade(false)
+            .respectCacheHeaders(false)
+            .build()
+    }
+
     /** One shared state for the whole life of the app process, so reopening the app does not reload everything. */
     val vm: Vm by lazy { Vm(this) }
 

@@ -2,6 +2,7 @@ package com.nova.tv
 
 import android.content.Context
 import android.os.Build
+import android.os.SystemClock
 import android.view.inputmethod.InputMethodManager
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
@@ -515,6 +516,22 @@ fun Home(vm: Vm) {
     BackHandler(enabled = q.isNotEmpty()) { vm.query = "" }
     BackHandler(enabled = q.isEmpty() && !vm.exitAsk) { vm.exitAsk = true }
 
+    val fm = LocalFocusManager.current
+    val contentFr = remember { FocusRequester() }
+    var pendingFocus by remember { mutableStateOf(false) }
+    val lastNav = remember { longArrayOf(0L) }
+    // After a tab change by the edge keys, focus goes into the new list as soon as it is ready.
+    LaunchedEffect(tab, lib != null) {
+        if (pendingFocus && lib != null) {
+            repeat(30) {
+                delay(100)
+                val ok = try { contentFr.requestFocus() } catch (e: Exception) { false }
+                if (ok) { pendingFocus = false; return@LaunchedEffect }
+            }
+            pendingFocus = false
+        }
+    }
+
     var res by remember { mutableStateOf<SearchRes?>(null) }
     val libCount = vm.libs.size
     LaunchedEffect(q, libCount, vm.hiddenKeys, vm.unlocked, cfg.hideAdult) {
@@ -547,7 +564,36 @@ fun Home(vm: Vm) {
 
     Column(Modifier.fillMaxSize()) {
         TopBar(vm)
-        Box(Modifier.weight(1f).fillMaxWidth()) {
+        Box(
+            Modifier.weight(1f).fillMaxWidth().focusRequester(contentFr).focusGroup()
+                // A held D-pad key repeats faster than the list can follow; skipping some repeats keeps scrolling smooth.
+                .onPreviewKeyEvent { e ->
+                    val k = e.key
+                    val nav = k == Key.DirectionUp || k == Key.DirectionDown || k == Key.DirectionLeft || k == Key.DirectionRight
+                    if (nav && e.type == KeyEventType.KeyDown && e.nativeKeyEvent.repeatCount > 0) {
+                        val t = SystemClock.uptimeMillis()
+                        if (t - lastNav[0] < 90L) true else { lastNav[0] = t; false }
+                    } else false
+                }
+                // Left at the far left edge opens the previous tab, Right at the far right edge opens the next one.
+                .onKeyEvent { e ->
+                    val dir = when (e.key) {
+                        Key.DirectionLeft -> FocusDirection.Left
+                        Key.DirectionRight -> FocusDirection.Right
+                        else -> null
+                    }
+                    if (dir == null || e.type != KeyEventType.KeyDown || vm.query.isNotBlank()) {
+                        false
+                    } else {
+                        val moved = try { fm.moveFocus(dir) } catch (ex: IllegalStateException) { true }
+                        if (!moved && e.nativeKeyEvent.repeatCount == 0) {
+                            val nt = vm.tab + (if (dir == FocusDirection.Right) 1 else -1)
+                            if (nt in 0..2) { pendingFocus = true; vm.selectTab(nt) }
+                        }
+                        true
+                    }
+                }
+        ) {
             if (q.isNotBlank()) {
                 SearchResults(vm, res, q)
             } else if (lib != null) {
@@ -737,7 +783,7 @@ fun PosterCard(vm: Vm, item: Item, onClick: () -> Unit) {
     val shown: String? = fetched ?: (if (broken) null else item.icon)
     val showLabel = cfg.titles || shown == null || f
     if (needsPoster && cfg.meta) {
-        LaunchedEffect(item.id, broken) { delay(250); vm.ensurePoster(item) }
+        LaunchedEffect(item.id, broken) { delay(450); vm.ensurePoster(item) }
     }
     val showEpg = live && cfg.epg && !mask
     val prog = if (showEpg) vm.epgMap[item.id]?.now(vm.now) else null

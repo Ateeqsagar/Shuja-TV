@@ -2,6 +2,8 @@ package com.nova.tv
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.os.Build
+import android.util.LruCache
 import android.media.MediaMetadataRetriever
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
@@ -96,7 +98,11 @@ private fun grabFrame(holder: Array<MediaMetadataRetriever?>, url: String, ua: S
             r.setDataSource(url, headers)
             holder[0] = r
         }
-        val bmp = r.getFrameAtTime(ms * 1000L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC) ?: return null
+        val bmp = (if (Build.VERSION.SDK_INT >= 27) {
+            r.getScaledFrameAtTime(ms * 1000L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC, 320, 180)
+        } else {
+            r.getFrameAtTime(ms * 1000L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+        }) ?: return null
         val w = 320
         val out = if (bmp.width > w) {
             val h = (bmp.height * w / bmp.width).coerceAtLeast(1)
@@ -170,6 +176,9 @@ private fun PlayerBody(list: List<Item>, start: Int, vm: Vm) {
     var hold by remember { mutableStateOf<Long?>(null) }
     var fails by remember { mutableIntStateOf(0) }
     val holder = remember { arrayOfNulls<MediaMetadataRetriever>(1) }
+    // Preview pictures already fetched (one per 2 seconds of video), so repeated jumps show instantly.
+    val cache = remember { LruCache<Long, Bitmap>(48) }
+    var scrubDir by remember { mutableIntStateOf(1) }
     val lock = remember { Mutex() }
     val fwdMs = SEEK_STEPS[cfg.seekF.coerceIn(0, SEEK_STEPS.lastIndex)] * 1000L
     val backMs = SEEK_STEPS[cfg.seekB.coerceIn(0, SEEK_STEPS.lastIndex)] * 1000L
@@ -237,10 +246,18 @@ private fun PlayerBody(list: List<Item>, start: Int, vm: Vm) {
     }
     LaunchedEffect(idx) {
         scrub = null; thumb = null; hold = null; fails = 0
+        cache.evictAll()
         lock.withLock {
             withContext(Dispatchers.IO) {
                 try { holder[0]?.release() } catch (e: Exception) { }
                 holder[0] = null
+            }
+        }
+        // Open the preview source right away so the first jump is already fast.
+        if (!item.live && cfg.preview) {
+            delay(1500)
+            lock.withLock {
+                withContext(Dispatchers.IO) { grabFrame(holder, vm.urlOf(item), vm.ua(), 0L) }
             }
         }
     }
@@ -258,14 +275,46 @@ private fun PlayerBody(list: List<Item>, start: Int, vm: Vm) {
     LaunchedEffect(hold) {
         if (hold != null) { delay(3000); hold = null; thumb = null }
     }
+    // Picture for the jump target: from the cache at once, otherwise fetched right away (nearest cached one shown meanwhile).
     LaunchedEffect(scrub) {
         val t = scrub
-        if (t != null && cfg.preview && fails < 3 && !item.live) {
-            delay(300)
-            val bmp = lock.withLock {
-                withContext(Dispatchers.IO) { grabFrame(holder, vm.urlOf(item), vm.ua(), t) }
+        if (t != null && cfg.preview && fails < 8 && !item.live) {
+            val key = t / 2000L
+            val hit = cache.get(key)
+            if (hit != null) {
+                thumb = hit
+            } else {
+                var near: Bitmap? = null
+                for (d in 1..6) {
+                    near = cache.get(key - d) ?: cache.get(key + d)
+                    if (near != null) break
+                }
+                if (near != null) thumb = near
+                delay(50)
+                val bmp = lock.withLock {
+                    withContext(Dispatchers.IO) { grabFrame(holder, vm.urlOf(item), vm.ua(), t) }
+                }
+                if (bmp != null) { cache.put(key, bmp); thumb = bmp; fails = 0 } else fails++
             }
-            if (bmp != null) thumb = bmp else fails++
+        }
+    }
+    // While jumping, pictures for the next few steps in the same direction are fetched in the background.
+    LaunchedEffect(scrub, hold) {
+        val t = scrub ?: hold
+        if (t != null && cfg.preview && fails < 8 && !item.live) {
+            delay(250)
+            val total = player.duration.coerceAtLeast(0L)
+            val step = if (scrubDir > 0) fwdMs else backMs
+            for (k in 1..6) {
+                val pt = (t + scrubDir * step * k).coerceIn(0L, if (total > 0L) total else Long.MAX_VALUE)
+                val key = pt / 2000L
+                if (cache.get(key) == null) {
+                    val b = lock.withLock {
+                        withContext(Dispatchers.IO) { grabFrame(holder, vm.urlOf(item), vm.ua(), pt) }
+                    }
+                    if (b != null) cache.put(key, b)
+                }
+            }
         }
     }
     LaunchedEffect(ping) { show = true; delay(4000); show = false }
@@ -315,6 +364,7 @@ private fun PlayerBody(list: List<Item>, start: Int, vm: Vm) {
                     if (!item.live) {
                         val d = player.duration.coerceAtLeast(0L)
                         val base = scrub ?: player.currentPosition
+                        scrubDir = 1
                         scrub = (base + fwdMs).coerceIn(0L, if (d > 0L) d else Long.MAX_VALUE)
                     }
                     ping++; true
@@ -322,6 +372,7 @@ private fun PlayerBody(list: List<Item>, start: Int, vm: Vm) {
                 Key.DirectionLeft -> {
                     if (!item.live) {
                         val base = scrub ?: player.currentPosition
+                        scrubDir = -1
                         scrub = (base - backMs).coerceAtLeast(0L)
                     }
                     ping++; true
@@ -449,7 +500,7 @@ private fun SeekCard(thumb: Bitmap?, target: Long, current: Long, total: Long, l
             } else {
                 Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
                     Text(if (fwd) "»" else "«", color = accent, fontSize = 48.sp, fontWeight = FontWeight.Black)
-                    Text(if (landing) "Loading scene…" else if (fwd) "Skipping ahead" else "Going back", color = Dim, fontSize = 14.sp)
+                    Text(if (landing) "Jumping…" else if (fwd) "Skipping ahead" else "Going back", color = Dim, fontSize = 14.sp)
                 }
             }
         }

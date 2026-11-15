@@ -849,24 +849,25 @@ class Vm(app: Application) : AndroidViewModel(app) {
     fun closeMovie() { movie = null; movieMeta = null }
 
     /** Looks up a poster for a card that has none (or whose picture failed to load). */
-    fun ensurePoster(item: Item) {
+    /** Runs inside the card's own effect, so it stops as soon as the card scrolls out of view. */
+    suspend fun ensurePoster(item: Item) {
         if (!cfg.meta || item.live || item.type == T_EP) return
         val k = itemKey(item)
-        if (posters.containsKey(k) || !posterTried.add(k)) return
+        if (posters.containsKey(k) || posterTried.contains(k)) return
         val saved = posterSp.getString(k, null)
-        if (saved != null) { posters[k] = saved; return }
-        viewModelScope.launch {
-            try {
-                val m = metaGate.withPermit { MetaLookup.find(item.name, item.type == T_SERIES, ua()) }
-                val url = m?.poster ?: ""
-                if (url.isNotBlank()) {
-                    posters[k] = url
-                    posterSp.edit().putString(k, url).apply()
-                }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Throwable) {
+        if (saved != null) { posters[k] = saved; posterTried.add(k); return }
+        try {
+            val m = metaGate.withPermit { MetaLookup.find(item.name, item.type == T_SERIES, ua()) }
+            posterTried.add(k)
+            val url = m?.poster ?: ""
+            if (url.isNotBlank()) {
+                posters[k] = url
+                posterSp.edit().putString(k, url).apply()
             }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            posterTried.add(k)
         }
     }
 
