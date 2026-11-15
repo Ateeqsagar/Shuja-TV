@@ -16,6 +16,9 @@ import kotlin.system.exitProcess
  * A 20 second guard prevents restart loops.
  */
 class App : Application() {
+    /** One shared state for the whole life of the app process, so reopening the app does not reload everything. */
+    val vm: Vm by lazy { Vm(this) }
+
     override fun onCreate() {
         super.onCreate()
         val previous = Thread.getDefaultUncaughtExceptionHandler()

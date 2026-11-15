@@ -91,6 +91,8 @@ data class Epg(val list: List<Prog>, val at: Long) {
 /** One "continue watching" entry. item = movie or episode; series is set for episodes. */
 class Hist(val item: Item, val series: Item?, val at: Long)
 
+class ResumeReq(val list: List<Item>, val index: Int, val posMs: Long)
+
 class PinReq(val title: String, val create: Boolean, val onOk: () -> Unit)
 class MenuTarget(val item: Item, val catId: String, val catName: String)
 
@@ -516,6 +518,12 @@ class Vm(app: Application) : AndroidViewModel(app) {
     var detailInfo by mutableStateOf<SeriesDetail?>(null); private set
     var detailErr by mutableStateOf<String?>(null); private set
 
+    // ---- resume prompt, exit prompt, refresh timing ----
+    var resumeReq by mutableStateOf<ResumeReq?>(null); private set
+    var exitAsk by mutableStateOf(false)
+    private var startAt = -1L
+    private var lastLoad = System.currentTimeMillis()
+
     // ---- continue watching ----
     var hist by mutableStateOf(loadHist(histSp)); private set
     private var histSeries: Item? = null
@@ -614,11 +622,42 @@ class Vm(app: Application) : AndroidViewModel(app) {
             libs.clear(); errs.clear(); loadingSet.clear(); loadingTypes = emptySet()
         }
         sp.edit().putString("h", a.host).putString("u", a.user).putString("p", a.pass).putInt("m", a.mode).apply()
+        lastLoad = System.currentTimeMillis()
         if (firstSignIn) showIntro = true
         if (a.mode == 0) startLoading()
     }
 
     fun finishIntro() { showIntro = false }
+
+    // The "Updating your content" screen belongs to a fresh start only. It is shown when the app was
+    // closed with Exit (or the system ended it), and skipped when the app is simply brought back to the front.
+    private var closedByUser = false
+
+    fun markClosed() { closedByUser = true }
+
+    fun onColdLaunch() {
+        if (!closedByUser) return
+        closedByUser = false
+        if (account == null) return
+        lastLoad = System.currentTimeMillis()
+        showIntro = true
+        refreshAll()
+    }
+
+    /** Called when the app comes back to the front. Refreshes quietly in the background if the lists are old. */
+    fun refreshIfStale() {
+        val a = account ?: return
+        if (showIntro || busy) return
+        if (System.currentTimeMillis() - lastLoad < 6 * 3600_000L) return
+        lastLoad = System.currentTimeMillis()
+        if (a.mode == 1) {
+            connect(a)
+            return
+        }
+        viewModelScope.launch {
+            for (t in 0..2) loadLib(t, true)
+        }
+    }
 
     /** Playlist link with the password part hidden. */
     fun serverLabel(): String {
@@ -656,12 +695,12 @@ class Vm(app: Application) : AndroidViewModel(app) {
         startLoading()
     }
 
-    private suspend fun loadLib(type: Int) {
+    private suspend fun loadLib(type: Int, quiet: Boolean = false) {
         val x = api ?: return
-        if (libs.containsKey(type) || !loadingSet.add(type)) return
-        loadingTypes = loadingTypes + type
+        if ((!quiet && libs.containsKey(type)) || !loadingSet.add(type)) return
+        if (!quiet) loadingTypes = loadingTypes + type
         try {
-            errs.remove(type)
+            if (!quiet) errs.remove(type)
             val cats = try {
                 x.categories(type)
             } catch (e: CancellationException) {
@@ -671,14 +710,17 @@ class Vm(app: Application) : AndroidViewModel(app) {
             }
             val items = x.items(type)
             val lib = withContext(Dispatchers.Default) { buildLib(cats, items) }
-            if (api === x) libs[type] = lib
+            if (api === x) {
+                libs[type] = lib
+                lastLoad = System.currentTimeMillis()
+            }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Throwable) {
-            if (api === x) errs[type] = friendly(e)
+            if (!quiet && api === x) errs[type] = friendly(e)
         } finally {
             loadingSet.remove(type)
-            loadingTypes = loadingTypes - type
+            if (!quiet) loadingTypes = loadingTypes - type
         }
     }
 
@@ -831,8 +873,35 @@ class Vm(app: Application) : AndroidViewModel(app) {
     fun play(list: List<Item>, i: Int) {
         if (i !in list.indices) return
         val item = list[i]
-        histSeries = if (item.type == T_EP) detail else null
-        if (!unlocked && isLocked(item)) askPin("Enter PIN to watch") { playing = list to i } else playing = list to i
+        fun go() {
+            val pos = resumeAt(item)
+            if (pos > 0L) {
+                resumeReq = ResumeReq(list, i, pos)
+            } else {
+                begin(list, i, 0L)
+            }
+        }
+        if (!unlocked && isLocked(item)) askPin("Enter PIN to watch") { go() } else go()
+    }
+
+    private fun begin(list: List<Item>, i: Int, at: Long) {
+        histSeries = if (list[i].type == T_EP) detail else null
+        startAt = at
+        playing = list to i
+    }
+
+    fun chooseResume(r: ResumeReq, fromStart: Boolean) {
+        resumeReq = null
+        if (r.index in r.list.indices) begin(r.list, r.index, if (fromStart) 0L else r.posMs)
+    }
+
+    fun cancelResume() { resumeReq = null }
+
+    /** Start position chosen for the item that is about to play (read once by the player). */
+    fun takeStartAt(): Long {
+        val v = startAt
+        startAt = -1L
+        return v
     }
     fun stop() { playing = null }
 

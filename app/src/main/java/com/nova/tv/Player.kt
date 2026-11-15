@@ -47,6 +47,7 @@ import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.SeekParameters
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
@@ -64,6 +65,26 @@ private fun fmt(ms: Long): String {
     return if (h > 0) "%d:%02d:%02d".format(h, m, x) else "%02d:%02d".format(m, x)
 }
 
+/** True when a preview picture is (almost) completely black, so it is not worth showing. */
+private fun isMostlyBlack(b: Bitmap): Boolean {
+    return try {
+        var sum = 0L; var n = 0
+        val sx = (b.width / 8).coerceAtLeast(1); val sy = (b.height / 8).coerceAtLeast(1)
+        var y = sy / 2
+        while (y < b.height) {
+            var x = sx / 2
+            while (x < b.width) {
+                val c = b.getPixel(x, y)
+                sum += ((c shr 16 and 0xFF) + (c shr 8 and 0xFF) + (c and 0xFF)) / 3
+                n++
+                x += sx
+            }
+            y += sy
+        }
+        n > 0 && sum / n < 10
+    } catch (e: Exception) { false }
+}
+
 /** One preview picture from the stream at the given time. Returns null if the server or format does not allow it. */
 private fun grabFrame(holder: Array<MediaMetadataRetriever?>, url: String, ua: String, ms: Long): Bitmap? {
     return try {
@@ -77,10 +98,11 @@ private fun grabFrame(holder: Array<MediaMetadataRetriever?>, url: String, ua: S
         }
         val bmp = r.getFrameAtTime(ms * 1000L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC) ?: return null
         val w = 320
-        if (bmp.width > w) {
+        val out = if (bmp.width > w) {
             val h = (bmp.height * w / bmp.width).coerceAtLeast(1)
             Bitmap.createScaledBitmap(bmp, w, h, true)
         } else bmp
+        if (isMostlyBlack(out)) null else out
     } catch (e: Exception) {
         null
     }
@@ -104,6 +126,7 @@ private fun buildPlayer(ctx: Context, cfg: Cfg, ua: String): ExoPlayer {
         .setMediaSourceFactory(DefaultMediaSourceFactory(http))
         .setAudioAttributes(AudioAttributes.DEFAULT, true)
         .setHandleAudioBecomingNoisy(true).build()
+    p.setSeekParameters(SeekParameters.CLOSEST_SYNC)
     var tp = p.trackSelectionParameters.buildUpon()
     if (cfg.quality == 1) tp = tp.setMaxVideoSize(1920, 1080)
     else if (cfg.quality == 2) tp = tp.setMaxVideoSize(1280, 720)
@@ -138,10 +161,13 @@ private fun PlayerBody(list: List<Item>, start: Int, vm: Vm) {
     var pos by remember { mutableLongStateOf(0L) }
     var dur by remember { mutableLongStateOf(0L) }
     var tries by remember { mutableIntStateOf(0) }
+    var firstStart by remember { mutableStateOf(true) }
     val fr = remember { FocusRequester() }
     val cfg = vm.cfg
     var scrub by remember { mutableStateOf<Long?>(null) }
     var thumb by remember { mutableStateOf<Bitmap?>(null) }
+    // After a jump is applied, the seek card stays up until the picture is back, so the screen never shows plain black.
+    var hold by remember { mutableStateOf<Long?>(null) }
     var fails by remember { mutableIntStateOf(0) }
     val holder = remember { arrayOfNulls<MediaMetadataRetriever>(1) }
     val lock = remember { Mutex() }
@@ -154,7 +180,7 @@ private fun PlayerBody(list: List<Item>, start: Int, vm: Vm) {
         val l = object : Player.Listener {
             override fun onPlaybackStateChanged(s: Int) {
                 buffering = s == Player.STATE_BUFFERING
-                if (s == Player.STATE_READY) { error = null; tries = 0 }
+                if (s == Player.STATE_READY) { error = null; tries = 0; hold = null; thumb = null }
                 if (s == Player.STATE_ENDED && !cur.live && vm.cfg.autoNext && idx + 1 < list.size) idx += 1
             }
             override fun onPlayerError(e: PlaybackException) {
@@ -195,7 +221,8 @@ private fun PlayerBody(list: List<Item>, start: Int, vm: Vm) {
     LaunchedEffect(idx) {
         tries = 0; error = null; buffering = true; ping++
         val u = vm.urlOf(item, vm.cfg.liveFormat == 1)
-        val at = vm.resumeAt(item)
+        val at = if (firstStart) vm.takeStartAt().coerceAtLeast(0L) else 0L
+        firstStart = false
         if (at > 0) player.setMediaItem(MediaItem.fromUri(u), at) else player.setMediaItem(MediaItem.fromUri(u))
         player.prepare()
         player.playWhenReady = true
@@ -209,7 +236,7 @@ private fun PlayerBody(list: List<Item>, start: Int, vm: Vm) {
         }
     }
     LaunchedEffect(idx) {
-        scrub = null; thumb = null; fails = 0
+        scrub = null; thumb = null; hold = null; fails = 0
         lock.withLock {
             withContext(Dispatchers.IO) {
                 try { holder[0]?.release() } catch (e: Exception) { }
@@ -221,12 +248,15 @@ private fun PlayerBody(list: List<Item>, start: Int, vm: Vm) {
     LaunchedEffect(scrub) {
         val t = scrub
         if (t != null) {
-            delay(900)
+            delay(700)
             player.seekTo(t)
             pos = t
+            hold = t
             scrub = null
-            thumb = null
         }
+    }
+    LaunchedEffect(hold) {
+        if (hold != null) { delay(3000); hold = null; thumb = null }
     }
     LaunchedEffect(scrub) {
         val t = scrub
@@ -300,8 +330,9 @@ private fun PlayerBody(list: List<Item>, start: Int, vm: Vm) {
                     val t = scrub
                     if (t != null) {
                         player.seekTo(t)
+                        pos = t
+                        hold = t
                         scrub = null
-                        thumb = null
                     } else if (!item.live) {
                         player.playWhenReady = !player.playWhenReady
                     }
@@ -321,6 +352,7 @@ private fun PlayerBody(list: List<Item>, start: Int, vm: Vm) {
                     isFocusable = false
                     isFocusableInTouchMode = false
                     keepScreenOn = true
+                    setKeepContentOnPlayerReset(true)
                     resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
                     setShutterBackgroundColor(android.graphics.Color.BLACK)
                 }
@@ -331,28 +363,15 @@ private fun PlayerBody(list: List<Item>, start: Int, vm: Vm) {
         if (buffering && error == null) CircularProgressIndicator(Modifier.align(Alignment.Center).size(56.dp), color = Red, strokeWidth = 5.dp)
         error?.let { Text(it, color = Red, fontSize = 22.sp, textAlign = TextAlign.Center, modifier = Modifier.align(Alignment.Center)) }
 
-        val sc = scrub
+        val sc = scrub ?: hold
         if (sc != null && !item.live) {
             val total = player.duration.coerceAtLeast(0L)
             val pf = if (total > 0L) (sc.toFloat() / total).coerceIn(0f, 1f) else 0f
+            val edge = pf.coerceIn(0.05f, 0.80f)
             Row(Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(start = 48.dp, end = 48.dp, bottom = 175.dp)) {
-                if (pf > 0.001f) Spacer(Modifier.weight(pf))
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Box(
-                        Modifier.width(240.dp).aspectRatio(16f / 9f).clip(RoundedCornerShape(8.dp))
-                            .background(Color.Black).border(2.dp, Color.White, RoundedCornerShape(8.dp))
-                    ) {
-                        val tb = thumb
-                        if (tb != null) {
-                            Image(bitmap = tb.asImageBitmap(), contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
-                        }
-                    }
-                    Text(
-                        fmt(sc), color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold,
-                        modifier = Modifier.padding(top = 4.dp).clip(RoundedCornerShape(4.dp)).background(Color.Black.copy(.7f)).padding(horizontal = 8.dp, vertical = 2.dp)
-                    )
-                }
-                if (pf < 0.999f) Spacer(Modifier.weight(1f - pf))
+                Spacer(Modifier.weight(edge))
+                SeekCard(thumb, sc, player.currentPosition, total, scrub == null)
+                Spacer(Modifier.weight(1f - edge))
             }
         }
 
@@ -403,6 +422,49 @@ private fun PlayerBody(list: List<Item>, start: Int, vm: Vm) {
                     color = Dim, fontSize = 16.sp
                 )
             }
+        }
+    }
+}
+
+/** Preview card shown while jumping: picture (when available), how far, where to, and a position bar. */
+@Composable
+private fun SeekCard(thumb: Bitmap?, target: Long, current: Long, total: Long, landing: Boolean) {
+    val delta = (target - current) / 1000L
+    val fwd = delta >= 0L
+    val a = if (delta < 0L) -delta else delta
+    val dText = if (a >= 60L) "${a / 60}m ${a % 60}s" else "${a}s"
+    val accent = if (fwd) Color(0xFF46D369) else Color(0xFFE87C03)
+    val frac = if (total > 0L) (target.toFloat() / total).coerceIn(0f, 1f) else 0f
+    val shape = RoundedCornerShape(14.dp)
+    Column(
+        Modifier.width(264.dp).clip(shape).background(Color(0xE6101010)).border(1.dp, Color.White.copy(.18f), shape).padding(10.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Box(
+            Modifier.fillMaxWidth().aspectRatio(16f / 9f).clip(RoundedCornerShape(8.dp))
+                .background(Brush.linearGradient(listOf(Color(0xFF2A1220), Color(0xFF14090F))))
+        ) {
+            if (thumb != null) {
+                Image(bitmap = thumb.asImageBitmap(), contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+            } else {
+                Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(if (fwd) "»" else "«", color = accent, fontSize = 48.sp, fontWeight = FontWeight.Black)
+                    Text(if (landing) "Loading scene…" else if (fwd) "Skipping ahead" else "Going back", color = Dim, fontSize = 14.sp)
+                }
+            }
+        }
+        Spacer(Modifier.height(10.dp))
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+            Text(if (landing) "Jumping to" else if (fwd) "»  +$dText" else "«  -$dText", color = if (landing) Color.White else accent, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+            Text(fmt(target), color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+        }
+        Spacer(Modifier.height(8.dp))
+        Box(Modifier.fillMaxWidth().height(4.dp).clip(RoundedCornerShape(2.dp)).background(Color.White.copy(.2f))) {
+            Box(Modifier.fillMaxWidth(frac).fillMaxHeight().background(accent))
+        }
+        if (total > 0L) {
+            Spacer(Modifier.height(4.dp))
+            Text(fmt(total), color = Dim, fontSize = 12.sp, modifier = Modifier.align(Alignment.End))
         }
     }
 }

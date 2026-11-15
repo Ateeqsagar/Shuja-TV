@@ -113,7 +113,7 @@ fun Modifier.safeDpad(): Modifier {
 }
 
 @Composable
-fun NovaApp(vm: Vm) {
+fun NovaApp(vm: Vm, onExit: () -> Unit) {
     Box(Modifier.fillMaxSize().background(Bg).safeDpad()) {
         if (vm.showIntro) {
             Intro(vm)
@@ -128,6 +128,8 @@ fun NovaApp(vm: Vm) {
         }
         vm.pinReq?.let { r -> PinDialog(r.create, r.title, { vm.submitPin(it) }) { vm.cancelPin() } }
         vm.menu?.let { m -> MenuDialog(vm, m) }
+        vm.resumeReq?.let { r -> ResumeDialog(vm, r) }
+        if (vm.exitAsk) ExitDialog(vm, onExit)
     }
 }
 
@@ -342,6 +344,71 @@ fun PinDialog(create: Boolean, title: String, onSubmit: (String) -> String?, onD
     }
 }
 
+fun formatTime(ms: Long): String {
+    val s = ms / 1000
+    val h = s / 3600
+    val m = s % 3600 / 60
+    val x = s % 60
+    return if (h > 0) "%d:%02d:%02d".format(h, m, x) else "%d:%02d".format(m, x)
+}
+
+@Composable
+fun ResumeDialog(vm: Vm, r: ResumeReq) {
+    val fr = remember { FocusRequester() }
+    val cur = r.list.getOrNull(r.index)
+    val title = cur?.name ?: ""
+    val noun = if (cur?.type == T_EP) "episode" else "movie"
+    val at = formatTime(r.posMs)
+    Dialog(onDismissRequest = { vm.cancelResume() }, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Column(
+            Modifier.width(500.dp).clip(RoundedCornerShape(14.dp)).background(Color(0xFF181818))
+                .border(1.dp, KeyBg, RoundedCornerShape(14.dp)).padding(32.dp).safeDpad(),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Text("RESUME PLAYBACK", color = Red, fontSize = 13.sp, fontWeight = FontWeight.Bold, letterSpacing = 2.sp)
+            Text(title, color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            Text(
+                "You previously watched this $noun up to $at. Would you like to continue from where you stopped, or start over from the beginning?",
+                color = Dim, fontSize = 15.sp
+            )
+            Spacer(Modifier.height(4.dp))
+            Btn("Resume from $at", Modifier.fillMaxWidth().focusRequester(fr)) { vm.chooseResume(r, false) }
+            Btn("Start from Beginning", Modifier.fillMaxWidth(), fill = KeyBg) { vm.chooseResume(r, true) }
+            Btn("Cancel", Modifier.fillMaxWidth(), fill = Color(0xFF222222), fontSize = 18.sp) { vm.cancelResume() }
+            LaunchedEffect(Unit) { fr.grab() }
+        }
+    }
+}
+
+@Composable
+fun ExitDialog(vm: Vm, onExit: () -> Unit) {
+    val fr = remember { FocusRequester() }
+    Dialog(onDismissRequest = { vm.exitAsk = false }, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Column(
+            Modifier.width(460.dp).clip(RoundedCornerShape(14.dp)).background(Color(0xFF181818))
+                .border(1.dp, KeyBg, RoundedCornerShape(14.dp)).padding(32.dp).safeDpad(),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Image(painter = painterResource(R.drawable.logo), contentDescription = null, modifier = Modifier.size(72.dp))
+            Text("Exit Shuja TV", color = Color.White, fontSize = 26.sp, fontWeight = FontWeight.Bold)
+            Text(
+                "Are you sure you want to exit the application? Your viewing progress has been saved.",
+                color = Dim, fontSize = 16.sp, textAlign = TextAlign.Center
+            )
+            Spacer(Modifier.height(6.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Btn("Cancel", Modifier.focusRequester(fr), fill = KeyBg, hPad = 36.dp) { vm.exitAsk = false }
+                Btn("Exit", hPad = 44.dp) {
+                    vm.exitAsk = false
+                    onExit()
+                }
+            }
+            LaunchedEffect(Unit) { fr.grab() }
+        }
+    }
+}
+
 @Composable
 fun MenuDialog(vm: Vm, m: MenuTarget) {
     val fr = remember { FocusRequester() }
@@ -446,6 +513,7 @@ fun Home(vm: Vm) {
     val lib = vm.libs[tab]
     LaunchedEffect(tab) { vm.ensure(tab) }
     BackHandler(enabled = q.isNotEmpty()) { vm.query = "" }
+    BackHandler(enabled = q.isEmpty() && !vm.exitAsk) { vm.exitAsk = true }
 
     var res by remember { mutableStateOf<SearchRes?>(null) }
     val libCount = vm.libs.size
@@ -741,7 +809,7 @@ fun EpRow(vm: Vm, ep: Item, modifier: Modifier = Modifier, onClick: () -> Unit) 
             if (ep.icon != null) AsyncImage(model = ep.icon, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
         }
         Text(ep.name, color = if (f) Color.Black else Color.White, fontSize = 18.sp, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-        if (resume) Tag("RESUME", Red)
+        if (resume) Tag("CONTINUE", Red)
     }
 }
 
@@ -848,7 +916,7 @@ fun MovieScreen(vm: Vm) {
                 }
                 Spacer(Modifier.height(8.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Btn(if (resume) "Resume" else "Play", Modifier.focusRequester(fr), fill = Color.White, textColor = Color.Black) { vm.play(listOf(m), 0) }
+                    Btn(if (resume) "Continue" else "Play", Modifier.focusRequester(fr), fill = Color.White, textColor = Color.Black) { vm.play(listOf(m), 0) }
                     Btn(if (fav) "Remove favorite" else "Add favorite", fill = KeyBg, fontSize = 18.sp) { vm.toggleFav(m) }
                     Btn("Lock / hide", fill = KeyBg, fontSize = 18.sp) { vm.openMenu(m) }
                     Btn("Back", fill = KeyBg, fontSize = 18.sp) { vm.closeMovie() }
