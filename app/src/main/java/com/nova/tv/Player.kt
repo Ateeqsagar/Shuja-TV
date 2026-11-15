@@ -1,11 +1,15 @@
 package com.nova.tv
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.media.MediaMetadataRetriever
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -19,6 +23,7 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.key.*
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -46,11 +51,39 @@ import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import coil.compose.AsyncImage
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 
 private fun fmt(ms: Long): String {
     val s = ms / 1000; val h = s / 3600; val m = s % 3600 / 60; val x = s % 60
     return if (h > 0) "%d:%02d:%02d".format(h, m, x) else "%02d:%02d".format(m, x)
+}
+
+/** One preview picture from the stream at the given time. Returns null if the server or format does not allow it. */
+private fun grabFrame(holder: Array<MediaMetadataRetriever?>, url: String, ua: String, ms: Long): Bitmap? {
+    return try {
+        var r = holder[0]
+        if (r == null) {
+            r = MediaMetadataRetriever()
+            val headers = HashMap<String, String>()
+            headers["User-Agent"] = ua
+            r.setDataSource(url, headers)
+            holder[0] = r
+        }
+        val bmp = r.getFrameAtTime(ms * 1000L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC) ?: return null
+        val w = 320
+        if (bmp.width > w) {
+            val h = (bmp.height * w / bmp.width).coerceAtLeast(1)
+            Bitmap.createScaledBitmap(bmp, w, h, true)
+        } else bmp
+    } catch (e: Exception) {
+        null
+    }
 }
 
 /**
@@ -107,6 +140,13 @@ private fun PlayerBody(list: List<Item>, start: Int, vm: Vm) {
     var tries by remember { mutableIntStateOf(0) }
     val fr = remember { FocusRequester() }
     val cfg = vm.cfg
+    var scrub by remember { mutableStateOf<Long?>(null) }
+    var thumb by remember { mutableStateOf<Bitmap?>(null) }
+    var fails by remember { mutableIntStateOf(0) }
+    val holder = remember { arrayOfNulls<MediaMetadataRetriever>(1) }
+    val lock = remember { Mutex() }
+    val fwdMs = SEEK_STEPS[cfg.seekF.coerceIn(0, SEEK_STEPS.lastIndex)] * 1000L
+    val backMs = SEEK_STEPS[cfg.seekB.coerceIn(0, SEEK_STEPS.lastIndex)] * 1000L
 
     val player = remember { buildPlayer(ctx, vm.cfg, vm.ua()) }
 
@@ -134,6 +174,12 @@ private fun PlayerBody(list: List<Item>, start: Int, vm: Vm) {
             } catch (e: Exception) { }
             player.removeListener(l)
             player.release()
+            CoroutineScope(Dispatchers.IO).launch {
+                lock.withLock {
+                    try { holder[0]?.release() } catch (e: Exception) { }
+                    holder[0] = null
+                }
+            }
         }
     }
 
@@ -160,6 +206,36 @@ private fun PlayerBody(list: List<Item>, start: Int, vm: Vm) {
                 delay(10_000)
                 vm.savePos(item, player.currentPosition, player.duration.coerceAtLeast(0L))
             }
+        }
+    }
+    LaunchedEffect(idx) {
+        scrub = null; thumb = null; fails = 0
+        lock.withLock {
+            withContext(Dispatchers.IO) {
+                try { holder[0]?.release() } catch (e: Exception) { }
+                holder[0] = null
+            }
+        }
+    }
+    // Seek is applied a moment after the last press, so several presses add up and the preview can follow.
+    LaunchedEffect(scrub) {
+        val t = scrub
+        if (t != null) {
+            delay(900)
+            player.seekTo(t)
+            pos = t
+            scrub = null
+            thumb = null
+        }
+    }
+    LaunchedEffect(scrub) {
+        val t = scrub
+        if (t != null && cfg.preview && fails < 3 && !item.live) {
+            delay(300)
+            val bmp = lock.withLock {
+                withContext(Dispatchers.IO) { grabFrame(holder, vm.urlOf(item), vm.ua(), t) }
+            }
+            if (bmp != null) thumb = bmp else fails++
         }
     }
     LaunchedEffect(ping) { show = true; delay(4000); show = false }
@@ -205,10 +281,30 @@ private fun PlayerBody(list: List<Item>, start: Int, vm: Vm) {
             when (k) {
                 Key.DirectionUp, Key.ChannelUp -> { if (item.live) idx = step(1); ping++; true }
                 Key.DirectionDown, Key.ChannelDown -> { if (item.live) idx = step(-1); ping++; true }
-                Key.DirectionRight -> { if (!item.live) player.seekTo(player.currentPosition + vm.cfg.seekSeconds * 1000L); ping++; true }
-                Key.DirectionLeft -> { if (!item.live) player.seekTo((player.currentPosition - vm.cfg.seekSeconds * 1000L).coerceAtLeast(0L)); ping++; true }
+                Key.DirectionRight -> {
+                    if (!item.live) {
+                        val d = player.duration.coerceAtLeast(0L)
+                        val base = scrub ?: player.currentPosition
+                        scrub = (base + fwdMs).coerceIn(0L, if (d > 0L) d else Long.MAX_VALUE)
+                    }
+                    ping++; true
+                }
+                Key.DirectionLeft -> {
+                    if (!item.live) {
+                        val base = scrub ?: player.currentPosition
+                        scrub = (base - backMs).coerceAtLeast(0L)
+                    }
+                    ping++; true
+                }
                 Key.DirectionCenter, Key.Enter, Key.NumPadEnter, Key.MediaPlayPause -> {
-                    if (!item.live) player.playWhenReady = !player.playWhenReady
+                    val t = scrub
+                    if (t != null) {
+                        player.seekTo(t)
+                        scrub = null
+                        thumb = null
+                    } else if (!item.live) {
+                        player.playWhenReady = !player.playWhenReady
+                    }
                     ping++; true
                 }
                 Key.Menu -> { vm.updateCfg(vm.cfg.copy(aspect = (vm.cfg.aspect + 1) % 3)); ping++; true }
@@ -235,6 +331,31 @@ private fun PlayerBody(list: List<Item>, start: Int, vm: Vm) {
         if (buffering && error == null) CircularProgressIndicator(Modifier.align(Alignment.Center).size(56.dp), color = Red, strokeWidth = 5.dp)
         error?.let { Text(it, color = Red, fontSize = 22.sp, textAlign = TextAlign.Center, modifier = Modifier.align(Alignment.Center)) }
 
+        val sc = scrub
+        if (sc != null && !item.live) {
+            val total = player.duration.coerceAtLeast(0L)
+            val pf = if (total > 0L) (sc.toFloat() / total).coerceIn(0f, 1f) else 0f
+            Row(Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(start = 48.dp, end = 48.dp, bottom = 175.dp)) {
+                if (pf > 0.001f) Spacer(Modifier.weight(pf))
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Box(
+                        Modifier.width(240.dp).aspectRatio(16f / 9f).clip(RoundedCornerShape(8.dp))
+                            .background(Color.Black).border(2.dp, Color.White, RoundedCornerShape(8.dp))
+                    ) {
+                        val tb = thumb
+                        if (tb != null) {
+                            Image(bitmap = tb.asImageBitmap(), contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+                        }
+                    }
+                    Text(
+                        fmt(sc), color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(top = 4.dp).clip(RoundedCornerShape(4.dp)).background(Color.Black.copy(.7f)).padding(horizontal = 8.dp, vertical = 2.dp)
+                    )
+                }
+                if (pf < 0.999f) Spacer(Modifier.weight(1f - pf))
+            }
+        }
+
         AnimatedVisibility(show, Modifier.align(Alignment.BottomCenter), enter = fadeIn() + slideInVertically { it / 2 }, exit = fadeOut()) {
             Row(
                 Modifier.fillMaxWidth()
@@ -259,6 +380,7 @@ private fun PlayerBody(list: List<Item>, start: Int, vm: Vm) {
                         if (prog != null) {
                             Spacer(Modifier.height(6.dp))
                             Text("Now: ${prog.title}", color = Color.White, fontSize = 18.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            if (prog.desc.isNotBlank()) Text(prog.desc, color = Dim, fontSize = 14.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
                             val pf = ((vm.now - prog.start * 1000f) / ((prog.end - prog.start) * 1000f)).coerceIn(0f, 1f)
                             Spacer(Modifier.height(4.dp))
                             Box(Modifier.fillMaxWidth().height(4.dp).clip(RoundedCornerShape(2.dp)).background(Color.White.copy(.2f))) {
@@ -267,16 +389,17 @@ private fun PlayerBody(list: List<Item>, start: Int, vm: Vm) {
                             nxt?.let { Text("Next: ${it.title}", color = Dim, fontSize = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis) }
                         }
                     } else {
-                        val frac = if (dur > 0) (pos.toFloat() / dur).coerceIn(0f, 1f) else 0f
+                        val shownPos = scrub ?: pos
+                        val frac = if (dur > 0) (shownPos.toFloat() / dur).coerceIn(0f, 1f) else 0f
                         Box(Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp)).background(Color.White.copy(.2f))) {
                             Box(Modifier.fillMaxWidth(frac).fillMaxHeight().background(RedBrush))
                         }
                         Spacer(Modifier.height(6.dp))
-                        Text("${fmt(pos)} / ${fmt(dur)}", color = Dim, fontSize = 16.sp)
+                        Text("${fmt(shownPos)} / ${fmt(dur)}", color = Dim, fontSize = 16.sp)
                     }
                 }
                 Text(
-                    if (item.live) "▲ ▼  channel     MENU  aspect" else "◀ ▶  seek ${vm.cfg.seekSeconds}s     OK  pause     MENU  aspect",
+                    if (item.live) "▲ ▼  channel     MENU  aspect" else "◀ ${backMs / 1000}s   ${fwdMs / 1000}s ▶     OK  pause     MENU  aspect",
                     color = Dim, fontSize = 16.sp
                 )
             }

@@ -1,13 +1,17 @@
 package com.nova.tv
 
+import android.content.Context
 import android.os.Build
+import android.view.inputmethod.InputMethodManager
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.*
-import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
@@ -35,7 +39,7 @@ import androidx.compose.ui.input.key.*
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
-import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -80,15 +84,46 @@ suspend fun FocusRequester.grab() {
     }
 }
 
+/**
+ * Moves focus with the D-pad ourselves, and survives the Compose bug where the focus search touches a list item
+ * that has just been removed ("LayoutCoordinate operations are only valid when isAttached is true").
+ * In that rare case this one key press does nothing instead of closing the app.
+ */
+@Composable
+fun Modifier.safeDpad(): Modifier {
+    val fm = LocalFocusManager.current
+    return this.onKeyEvent { e ->
+        val dir = when (e.key) {
+            Key.DirectionUp -> FocusDirection.Up
+            Key.DirectionDown -> FocusDirection.Down
+            Key.DirectionLeft -> FocusDirection.Left
+            Key.DirectionRight -> FocusDirection.Right
+            else -> null
+        }
+        if (dir == null || e.type != KeyEventType.KeyDown) {
+            false
+        } else {
+            try {
+                fm.moveFocus(dir)
+            } catch (ex: IllegalStateException) {
+                true
+            }
+        }
+    }
+}
+
 @Composable
 fun NovaApp(vm: Vm) {
-    Box(Modifier.fillMaxSize().background(Bg)) {
-        if (vm.startup) { StartupScreen(vm.startupProgress) } else if (vm.account == null) {
+    Box(Modifier.fillMaxSize().background(Bg).safeDpad()) {
+        if (vm.showIntro) {
+            Intro(vm)
+        } else if (vm.account == null) {
             LoginScreen(vm)
         } else {
             Home(vm)
             if (vm.settingsOpen) SettingsScreen(vm)
             if (vm.detail != null) SeriesScreen(vm)
+            if (vm.movie != null) MovieScreen(vm)
             vm.playing?.let { p -> PlayerScreen(p.first, p.second, vm) { vm.stop() } }
         }
         vm.pinReq?.let { r -> PinDialog(r.create, r.title, { vm.submitPin(it) }) { vm.cancelPin() } }
@@ -99,7 +134,7 @@ fun NovaApp(vm: Vm) {
 @Composable
 fun FullDialog(onClose: () -> Unit, content: @Composable () -> Unit) {
     Dialog(onDismissRequest = onClose, properties = DialogProperties(usePlatformDefaultWidth = false, dismissOnClickOutside = false)) {
-        Box(Modifier.fillMaxSize().background(Bg)) { content() }
+        Box(Modifier.fillMaxSize().background(Bg).safeDpad()) { content() }
     }
 }
 
@@ -109,7 +144,6 @@ fun Field(
     password: Boolean = false, ime: ImeAction = ImeAction.Next, onGo: (() -> Unit)? = null
 ) {
     var f by remember { mutableStateOf(false) }
-    val keyboard = LocalSoftwareKeyboardController.current
     BasicTextField(
         value = value, onValueChange = onChange, singleLine = true,
         textStyle = TextStyle(color = Color.White, fontSize = 18.sp),
@@ -117,7 +151,7 @@ fun Field(
         visualTransformation = if (password) PasswordVisualTransformation() else VisualTransformation.None,
         keyboardOptions = KeyboardOptions(imeAction = ime),
         keyboardActions = KeyboardActions(onSearch = { onGo?.invoke() }, onDone = { onGo?.invoke() }),
-        modifier = modifier.onFocusChanged { f = it.hasFocus; if(it.hasFocus) keyboard?.show() }.clickable { keyboard?.show() },
+        modifier = modifier.onFocusChanged { f = it.hasFocus },
         decorationBox = { inner ->
             Box(
                 Modifier.fillMaxWidth().clip(RoundedCornerShape(6.dp)).background(KeyBg)
@@ -128,6 +162,82 @@ fun Field(
             }
         }
     )
+}
+
+/**
+ * Search box for TV: D-pad focus only highlights it. Pressing OK turns it into a text field and opens the keyboard.
+ */
+@Composable
+fun SearchBox(value: String, onChange: (String) -> Unit, modifier: Modifier = Modifier, onGo: () -> Unit) {
+    var editing by remember { mutableStateOf(false) }
+    var f by remember { mutableStateOf(false) }
+    var got by remember(editing) { mutableStateOf(false) }
+    val tf = remember { FocusRequester() }
+    val view = LocalView.current
+    val ctx = LocalContext.current
+    fun showKeyboard() {
+        try {
+            val imm = ctx.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+            imm.showSoftInput(view, InputMethodManager.SHOW_IMPLICIT)
+        } catch (e: Exception) {
+        }
+    }
+    LaunchedEffect(editing) {
+        if (editing) {
+            tf.grab()
+            delay(80)
+            showKeyboard()
+        }
+    }
+    val shape = RoundedCornerShape(6.dp)
+    if (!editing) {
+        Box(
+            modifier.clip(shape).background(KeyBg)
+                .border(2.dp, if (f) Color.White else Color.Transparent, shape)
+                .onFocusChanged { f = it.hasFocus }
+                .onPreviewKeyEvent { e ->
+                    val k = e.key
+                    val center = k == Key.DirectionCenter || k == Key.Enter || k == Key.NumPadEnter
+                    if (center && e.type == KeyEventType.KeyDown && e.nativeKeyEvent.repeatCount > 0) {
+                        // long press on the search bar: start a fresh search
+                        onChange("")
+                        editing = true
+                        true
+                    } else false
+                }
+                .clickable { editing = true }.padding(14.dp)
+        ) {
+            Text(
+                if (value.isEmpty()) "Search all" else value,
+                color = if (value.isEmpty()) Dim else Color.White, fontSize = 18.sp, maxLines = 1, overflow = TextOverflow.Ellipsis
+            )
+        }
+    } else {
+        BasicTextField(
+            value = value, onValueChange = onChange, singleLine = true,
+            textStyle = TextStyle(color = Color.White, fontSize = 18.sp),
+            cursorBrush = SolidColor(Color.White),
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+            keyboardActions = KeyboardActions(onSearch = { onGo(); editing = false }, onDone = { onGo(); editing = false }),
+            modifier = modifier.focusRequester(tf)
+                .onFocusChanged {
+                    if (it.isFocused) got = true else if (got) editing = false
+                }
+                .onPreviewKeyEvent { e ->
+                    val k = e.key
+                    if (e.type == KeyEventType.KeyUp && (k == Key.DirectionCenter || k == Key.Enter || k == Key.NumPadEnter)) {
+                        showKeyboard()
+                        true
+                    } else false
+                },
+            decorationBox = { inner ->
+                Box(
+                    Modifier.fillMaxWidth().clip(shape).background(KeyBg)
+                        .border(2.dp, Color.White, shape).padding(14.dp)
+                ) { inner() }
+            }
+        )
+    }
 }
 
 @Composable
@@ -198,6 +308,7 @@ fun PinDialog(create: Boolean, title: String, onSubmit: (String) -> String?, onD
         Column(
             Modifier.width(360.dp).clip(RoundedCornerShape(10.dp)).background(Color(0xFF181818))
                 .border(1.dp, KeyBg, RoundedCornerShape(10.dp)).padding(28.dp)
+                .safeDpad()
                 .onPreviewKeyEvent { e ->
                     val c = e.utf16CodePoint
                     if (e.type == KeyEventType.KeyDown && c in '0'.code..'9'.code) { push((c - '0'.code).toString()); true } else false
@@ -234,6 +345,7 @@ fun PinDialog(create: Boolean, title: String, onSubmit: (String) -> String?, onD
 @Composable
 fun MenuDialog(vm: Vm, m: MenuTarget) {
     val fr = remember { FocusRequester() }
+
     val ik = vm.itemKey(m.item)
     val ck = vm.catKey(m.item.type, m.catId)
     val noun = when (m.item.type) {
@@ -244,7 +356,7 @@ fun MenuDialog(vm: Vm, m: MenuTarget) {
     Dialog(onDismissRequest = { vm.closeMenu() }, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Column(
             Modifier.width(440.dp).clip(RoundedCornerShape(10.dp)).background(Color(0xFF181818))
-                .border(1.dp, KeyBg, RoundedCornerShape(10.dp)).padding(28.dp),
+                .border(1.dp, KeyBg, RoundedCornerShape(10.dp)).padding(28.dp).safeDpad(),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             Text(m.item.name, color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -262,38 +374,46 @@ fun MenuDialog(vm: Vm, m: MenuTarget) {
 // ---------------- screens ----------------
 
 @Composable
-fun StartupScreen(progress:Int) {
-    Box(Modifier.fillMaxSize().background(Bg),contentAlignment=Alignment.Center){ Column(horizontalAlignment=Alignment.CenterHorizontally,verticalArrangement=Arrangement.spacedBy(20.dp)){ Image(painterResource(R.drawable.logo),null,Modifier.size(132.dp),contentScale=ContentScale.Fit); Text("SHUJA TV",color=Red,fontSize=34.sp,fontWeight=FontWeight.Black); Text("Updating your content",color=Color.White,fontSize=22.sp,fontWeight=FontWeight.Bold); Text("Channels, movies, series and programme guide",color=Dim,fontSize=15.sp); Box(Modifier.width(360.dp).height(7.dp).clip(RoundedCornerShape(8.dp)).background(KeyBg)){ Box(Modifier.fillMaxWidth(progress.coerceIn(0,100)/100f).fillMaxHeight().background(Red)) }; Text("$progress%",color=Dim,fontSize=14.sp) } }
-}
-
-@Composable
 fun LoginScreen(vm: Vm) {
+    var mode by remember { mutableIntStateOf(0) }
     var host by remember { mutableStateOf("") }
     var user by remember { mutableStateOf("") }
     var pass by remember { mutableStateOf("") }
-    var kind by remember { mutableIntStateOf(0) }
+    var url by remember { mutableStateOf("") }
     Box(Modifier.fillMaxSize()) {
         Image(painter = painterResource(R.drawable.logo), contentDescription = null, modifier = Modifier.padding(32.dp).size(96.dp))
         Column(
-            Modifier.align(Alignment.Center).width(480.dp).clip(RoundedCornerShape(8.dp))
-                .background(Color.Black.copy(.75f)).padding(48.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
+            Modifier.align(Alignment.Center).width(500.dp).clip(RoundedCornerShape(8.dp))
+                .background(Color.Black.copy(.75f)).padding(40.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             Text("Sign In", color = Color.White, fontSize = 32.sp, fontWeight = FontWeight.Bold)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                NavTab("Xtream Codes", kind == 0) { kind = 0 }
-                NavTab("M3U Playlist", kind == 1) { kind = 1 }
+                Btn("Xtream Codes", Modifier.weight(1f), fill = if (mode == 0) Red else KeyBg, fontSize = 16.sp, hPad = 8.dp) { mode = 0 }
+                Btn("M3U Playlist", Modifier.weight(1f), fill = if (mode == 1) Red else KeyBg, fontSize = 16.sp, hPad = 8.dp) { mode = 1 }
             }
-            Field(host, { host = it }, if (kind == 0) "Server  (http://host:port)" else "M3U playlist URL")
-            if (kind == 0) {
+            if (mode == 0) {
+                Field(host, { host = it }, "Server  (http://host:port)")
                 Field(user, { user = it }, "Username")
                 Field(pass, { pass = it }, "Password", password = true, ime = ImeAction.Done)
+            } else {
+                Field(url, { url = it }, "Playlist URL  (http://.../playlist.m3u)", ime = ImeAction.Done)
             }
             vm.error?.let { Text(it, color = Color(0xFFE87C03), fontSize = 16.sp) }
             Btn(if (vm.busy) "Connecting…" else "Sign In", Modifier.fillMaxWidth()) {
-                if (!vm.busy && host.isNotBlank() && (kind == 1 || user.isNotBlank())) vm.login(Account(host.trim(), user.trim(), pass, kind))
+                if (!vm.busy) {
+                    if (mode == 0) {
+                        if (host.isNotBlank() && user.isNotBlank()) vm.login(Account(host.trim(), user.trim(), pass))
+                    } else if (url.isNotBlank()) {
+                        vm.login(Account(url.trim(), "", "", 1))
+                    }
+                }
             }
-            Text(if(kind==0) "Use the Xtream Codes details from your provider." else "Use an authorised remote M3U/M3U8 playlist URL.", color = Dim, fontSize = 14.sp)
+            Text(
+                if (mode == 0) "Use the Xtream Codes details from your provider."
+                else "Paste the M3U / M3U8 link from your provider. Big playlists can take a minute.",
+                color = Dim, fontSize = 14.sp
+            )
         }
     }
 }
@@ -314,10 +434,7 @@ fun TopBar(vm: Vm) {
         Spacer(Modifier.weight(1f))
         NavTab("Settings", false) { vm.settingsOpen = true }
         Spacer(Modifier.width(8.dp))
-        Field(
-            vm.query, { vm.query = it }, "Search all", Modifier.width(260.dp),
-            ime = ImeAction.Search, onGo = { fm.moveFocus(FocusDirection.Down) }
-        )
+        SearchBox(vm.query, { vm.query = it }, Modifier.width(260.dp)) { fm.moveFocus(FocusDirection.Down) }
     }
 }
 
@@ -530,8 +647,7 @@ fun ShelfRow(vm: Vm, title: String, list: List<Item>, cont: List<Hist>? = null) 
     }
 }
 
-/** OK = play / open. Long-press OK (or the Menu key) = favorites, lock and hide menu. */
-@OptIn(ExperimentalFoundationApi::class)
+/** OK = play / open. The remote Menu key opens favorites, lock and hide. There is no long-press on cards. */
 @Composable
 fun PosterCard(vm: Vm, item: Item, onClick: () -> Unit) {
     val cfg = vm.cfg
@@ -544,11 +660,17 @@ fun PosterCard(vm: Vm, item: Item, onClick: () -> Unit) {
         2 -> 1.25f
         else -> 1f
     }
-    val showLabel = cfg.titles || item.icon == null || f
     val locked = vm.isLocked(item)
     val hidden = vm.isHidden(item)
     val mask = locked && !vm.unlocked
-    val handled = remember { booleanArrayOf(false) }
+    var broken by remember(item.id) { mutableStateOf(false) }
+    val needsPoster = !live && !mask && (item.icon == null || broken)
+    val fetched = if (needsPoster) vm.posters[vm.itemKey(item)] else null
+    val shown: String? = fetched ?: (if (broken) null else item.icon)
+    val showLabel = cfg.titles || shown == null || f
+    if (needsPoster && cfg.meta) {
+        LaunchedEffect(item.id, broken) { delay(250); vm.ensurePoster(item) }
+    }
     val showEpg = live && cfg.epg && !mask
     val prog = if (showEpg) vm.epgMap[item.id]?.now(vm.now) else null
     if (showEpg) {
@@ -562,26 +684,17 @@ fun PosterCard(vm: Vm, item: Item, onClick: () -> Unit) {
             .border(3.dp, if (f) Color.White else Color.Transparent, shape)
             .onFocusChanged { f = it.hasFocus }
             .onPreviewKeyEvent { e ->
-                val k = e.key
-                val center = k == Key.DirectionCenter || k == Key.Enter || k == Key.NumPadEnter
-                when {
-                    e.type == KeyEventType.KeyDown && k == Key.Menu -> { vm.openMenu(item); true }
-                    center && e.type == KeyEventType.KeyDown && e.nativeKeyEvent.repeatCount > 0 -> {
-                        if (!handled[0]) { handled[0] = true; vm.openMenu(item) }
-                        true
-                    }
-                    center && e.type == KeyEventType.KeyUp && handled[0] -> { handled[0] = false; true }
-                    else -> false
-                }
+                if (e.type == KeyEventType.KeyDown && e.key == Key.Menu) { vm.openMenu(item); true } else false
             }
             .clickable(onClick = onClick)
     ) {
         if (mask) {
             Text("LOCKED", color = Red, fontSize = 16.sp, fontWeight = FontWeight.Black, letterSpacing = 2.sp, modifier = Modifier.align(Alignment.Center))
-        } else if (item.icon != null) {
+        } else if (shown != null) {
             AsyncImage(
-                model = item.icon, contentDescription = null,
+                model = shown, contentDescription = null,
                 contentScale = if (live) ContentScale.Fit else ContentScale.Crop,
+                onError = { broken = true },
                 modifier = Modifier.fillMaxSize().then(if (live) Modifier.padding(14.dp) else Modifier)
             )
         } else {
@@ -637,8 +750,8 @@ fun SeriesScreen(vm: Vm) {
     val d = vm.detail ?: return
     val info = vm.detailInfo
     val err = vm.detailErr
-    var season by remember(info) { mutableIntStateOf(info?.eps?.keys?.firstOrNull() ?: 0) }
-    val allEps = remember(info) { info?.eps?.values?.flatten() ?: emptyList<Item>() }
+    var season by remember(info?.eps) { mutableIntStateOf(info?.eps?.keys?.firstOrNull() ?: 0) }
+    val allEps = remember(info?.eps) { info?.eps?.values?.flatten() ?: emptyList<Item>() }
     val fr = remember { FocusRequester() }
     val back = remember { FocusRequester() }
     FullDialog({ vm.closeDetail() }) {
@@ -647,16 +760,24 @@ fun SeriesScreen(vm: Vm) {
             horizontalArrangement = Arrangement.spacedBy(32.dp)
         ) {
             Column(Modifier.width(250.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                if (d.icon != null) {
+                val meta = info?.meta
+                val poster: String? = if (meta != null && meta.poster.isNotBlank()) meta.poster else d.icon
+                if (poster != null) {
                     AsyncImage(
-                        model = d.icon, contentDescription = null, contentScale = ContentScale.Crop,
+                        model = poster, contentDescription = null, contentScale = ContentScale.Crop,
                         modifier = Modifier.fillMaxWidth().aspectRatio(2f / 3f).clip(RoundedCornerShape(8.dp)).background(Panel)
                     )
                 }
                 Text(d.name, color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold, maxLines = 3, overflow = TextOverflow.Ellipsis)
-                val plot = info?.plot
-                if (!plot.isNullOrBlank()) Text(plot, color = Dim, fontSize = 14.sp, maxLines = 7, overflow = TextOverflow.Ellipsis)
-                Btn("Back", Modifier.focusRequester(back), fill = KeyBg, fontSize = 18.sp) { vm.closeDetail() }
+                if (meta != null) {
+                    val line = listOf(meta.year, meta.genre, if (meta.rating.isNotBlank()) "Rating ${meta.rating}" else "")
+                        .filter { it.isNotBlank() }.joinToString("  |  ")
+                    if (line.isNotBlank()) Text(line, color = Light, fontSize = 14.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    if (meta.plot.isNotBlank()) Text(meta.plot, color = Dim, fontSize = 14.sp, maxLines = 7, overflow = TextOverflow.Ellipsis)
+                }
+                Btn(if (vm.itemKey(d) in vm.favKeys) "Remove favorite" else "Add favorite", Modifier.fillMaxWidth(), fill = KeyBg, fontSize = 16.sp) { vm.toggleFav(d) }
+                Btn("Lock / hide", Modifier.fillMaxWidth(), fill = KeyBg, fontSize = 16.sp) { vm.openMenu(d) }
+                Btn("Back", Modifier.fillMaxWidth().focusRequester(back), fill = KeyBg, fontSize = 18.sp) { vm.closeDetail() }
             }
             Column(Modifier.weight(1f).fillMaxHeight(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 when {
@@ -686,6 +807,157 @@ fun SeriesScreen(vm: Vm) {
         }
         LaunchedEffect(info, season) {
             if (info != null && info.eps.isNotEmpty()) fr.grab() else back.grab()
+        }
+    }
+}
+
+// ---------------- movie details ----------------
+
+@Composable
+fun MovieScreen(vm: Vm) {
+    val m = vm.movie ?: return
+    val meta = vm.movieMeta
+    val fr = remember { FocusRequester() }
+    val resume = vm.resumeAt(m) > 0
+    val fav = vm.itemKey(m) in vm.favKeys
+    FullDialog({ vm.closeMovie() }) {
+        Row(
+            Modifier.fillMaxSize().padding(horizontal = 56.dp, vertical = 32.dp),
+            horizontalArrangement = Arrangement.spacedBy(36.dp)
+        ) {
+            val poster: String? = if (meta != null && meta.poster.isNotBlank()) meta.poster else (vm.posters[vm.itemKey(m)] ?: m.icon)
+            Box(Modifier.width(260.dp).aspectRatio(2f / 3f).clip(RoundedCornerShape(8.dp)).background(Panel)) {
+                if (poster != null) {
+                    AsyncImage(model = poster, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+                }
+            }
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(m.name, color = Color.White, fontSize = 32.sp, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                if (meta == null) {
+                    Text("Loading details…", color = Dim, fontSize = 16.sp)
+                } else {
+                    val line = listOf(meta.year, meta.duration, meta.genre, if (meta.rating.isNotBlank()) "Rating ${meta.rating}" else "")
+                        .filter { it.isNotBlank() }.joinToString("  |  ")
+                    if (line.isNotBlank()) Text(line, color = Light, fontSize = 16.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    if (meta.plot.isNotBlank()) {
+                        Text(meta.plot, color = Dim, fontSize = 16.sp, maxLines = 8, overflow = TextOverflow.Ellipsis)
+                    } else {
+                        Text("No description available.", color = Dim, fontSize = 16.sp)
+                    }
+                    if (meta.cast.isNotBlank()) Text("Cast: ${meta.cast}", color = Dim, fontSize = 14.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                }
+                Spacer(Modifier.height(8.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Btn(if (resume) "Resume" else "Play", Modifier.focusRequester(fr), fill = Color.White, textColor = Color.Black) { vm.play(listOf(m), 0) }
+                    Btn(if (fav) "Remove favorite" else "Add favorite", fill = KeyBg, fontSize = 18.sp) { vm.toggleFav(m) }
+                    Btn("Lock / hide", fill = KeyBg, fontSize = 18.sp) { vm.openMenu(m) }
+                    Btn("Back", fill = KeyBg, fontSize = 18.sp) { vm.closeMovie() }
+                }
+            }
+        }
+        LaunchedEffect(Unit) { fr.grab() }
+    }
+}
+
+// ---------------- start-up screen ----------------
+
+@Composable
+fun Intro(vm: Vm) {
+    val tab = vm.tab
+    val kinds = listOf(T_LIVE to "Live TV", T_MOVIE to "Movies", T_SERIES to "Series")
+    fun st(t: Int): Int = when {
+        vm.libs.containsKey(t) -> 2
+        vm.errs.containsKey(t) -> 3
+        vm.loadingTypes.contains(t) -> 1
+        else -> 0
+    }
+    val signedIn = vm.account != null
+    val done = kinds.count { st(it.first) >= 2 }
+    val ready = signedIn && st(tab) >= 2
+    var minDone by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) { delay(1800); minDone = true }
+    LaunchedEffect(done, ready, minDone, signedIn) {
+        if (signedIn && minDone) {
+            if (done == 3) {
+                delay(600)
+                vm.finishIntro()
+            } else if (ready) {
+                delay(8000)
+                vm.finishIntro()
+            }
+        }
+    }
+    val frac by animateFloatAsState(done / 3f, tween(400), label = "frac")
+    val inf = rememberInfiniteTransition(label = "pulse")
+    val pulse by inf.animateFloat(0.94f, 1.06f, infiniteRepeatable(tween(1300), RepeatMode.Reverse), label = "pp")
+    val fr = remember { FocusRequester() }
+    LaunchedEffect(Unit) { fr.grab() }
+    Box(
+        Modifier.fillMaxSize()
+            .background(Brush.radialGradient(listOf(Color(0xFF3A0F2E), Color(0xFF150A12), Color.Black)))
+            .focusRequester(fr).focusable()
+            .onKeyEvent { e ->
+                val k = e.key
+                if (e.type == KeyEventType.KeyUp && ready && (k == Key.DirectionCenter || k == Key.Enter || k == Key.NumPadEnter)) {
+                    vm.finishIntro()
+                    true
+                } else false
+            }
+    ) {
+        Column(
+            Modifier.align(Alignment.Center).width(480.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Image(
+                painter = painterResource(R.drawable.logo), contentDescription = null,
+                modifier = Modifier.size(132.dp).graphicsLayer { scaleX = pulse; scaleY = pulse }
+            )
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("Shuja", color = Color.White, fontSize = 44.sp, fontWeight = FontWeight.Black)
+                Text(
+                    "TV", color = Color.White, fontSize = 30.sp, fontWeight = FontWeight.Black,
+                    modifier = Modifier.clip(RoundedCornerShape(8.dp)).background(Red).padding(horizontal = 12.dp, vertical = 2.dp)
+                )
+            }
+            Text("WATCH   •   ENJOY   •   MORE", color = Dim, fontSize = 14.sp, letterSpacing = 3.sp)
+            Spacer(Modifier.height(18.dp))
+            Text(
+                if (!signedIn) "Signing in…" else if (done < 3) "Updating your content" else "All up to date",
+                color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold
+            )
+            Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                for ((t, label) in kinds) {
+                    val state = if (signedIn) st(t) else 0
+                    val dot = when (state) {
+                        1 -> Color(0xFFE87C03)
+                        2 -> Color(0xFF46D369)
+                        3 -> Red
+                        else -> Color(0xFF555555)
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Box(Modifier.size(12.dp).clip(CircleShape).background(dot))
+                        Text(label, color = Light, fontSize = 18.sp, modifier = Modifier.weight(1f))
+                        val n = vm.libs[t]?.all?.size
+                        Text(
+                            when (state) {
+                                0 -> "Waiting"
+                                1 -> "Updating…"
+                                2 -> if (n != null) "%,d".format(n) else "Done"
+                                else -> "Could not update"
+                            },
+                            color = Dim, fontSize = 16.sp
+                        )
+                    }
+                }
+            }
+            Box(Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp)).background(Color.White.copy(.15f))) {
+                Box(Modifier.fillMaxWidth(frac).fillMaxHeight().background(Red))
+            }
+            Text(
+                if (ready && done < 3) "Press OK to continue now" else " ",
+                color = Dim, fontSize = 14.sp
+            )
         }
     }
 }
@@ -743,12 +1015,20 @@ fun SettingsScreen(vm: Vm) {
             }
             LazyColumn(Modifier.weight(1f).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 item { SectionTitle("Account") }
-                item { SettingRow("Server", vm.account?.host ?: "") {} }
-                item { SettingRow("Username", vm.account?.user ?: "") {} }
-                item { SettingRow("Password", "****") {} }
-                item { SettingRow("Subscription", vm.info.status.ifBlank { "Active" }) {} }
-                item { SettingRow("Expires", vm.info.exp.ifBlank { "Unknown" }) {} }
-                item { SettingRow("Connections", "${vm.info.activeCons.ifBlank { "0" }} of ${vm.info.maxCons.ifBlank { "?" }} in use") {} }
+                if (vm.account?.mode == 1) {
+                    item { SettingRow("Source", "M3U playlist") {} }
+                    item { SettingRow("Playlist link", vm.serverLabel()) {} }
+                    item { SettingRow("Password / token", "****") {} }
+                } else {
+                    item { SettingRow("Server", vm.serverLabel()) {} }
+                    item { SettingRow("Username", vm.account?.user ?: "") {} }
+                    item { SettingRow("Password", "****") {} }
+                }
+                if (vm.account?.mode != 1) {
+                    item { SettingRow("Subscription", vm.info.status.ifBlank { "Active" }) {} }
+                    item { SettingRow("Expires", vm.info.exp.ifBlank { "Unknown" }) {} }
+                    item { SettingRow("Connections", "${vm.info.activeCons.ifBlank { "0" }} of ${vm.info.maxCons.ifBlank { "?" }} in use") {} }
+                }
                 item { SettingRow("Refresh all content", "Reload lists") { vm.refreshAll(); toast("Reloading content") } }
                 item { SettingRow("Sign out", "") { vm.logout() } }
 
@@ -759,9 +1039,11 @@ fun SettingsScreen(vm: Vm) {
                 item { SettingRow("Aspect ratio", pick(ASPECTS, c.aspect)) { vm.updateCfg(c.copy(aspect = (c.aspect + 1) % ASPECTS.size)) } }
                 item { SettingRow("Audio language", pick(AUDIO_NAMES, c.audio)) { vm.updateCfg(c.copy(audio = (c.audio + 1) % AUDIO_NAMES.size)) } }
                 item { SettingRow("Subtitles", onOff(c.subs)) { vm.updateCfg(c.copy(subs = !c.subs)) } }
+                item { SettingRow("Skip forward (right button)", "${SEEK_STEPS[c.seekF]} seconds") { vm.updateCfg(c.copy(seekF = (c.seekF + 1) % SEEK_STEPS.size)) } }
+                item { SettingRow("Skip back (left button)", "${SEEK_STEPS[c.seekB]} seconds") { vm.updateCfg(c.copy(seekB = (c.seekB + 1) % SEEK_STEPS.size)) } }
+                item { SettingRow("Seek preview picture", onOff(c.preview)) { vm.updateCfg(c.copy(preview = !c.preview)) } }
                 item { SettingRow("Resume where you left off", onOff(c.resume)) { vm.updateCfg(c.copy(resume = !c.resume)) } }
-                item { SettingRow("Seek forward/back", "${c.seekSeconds} seconds") { val v=listOf(5,10,15,30,60,120,300); val i=v.indexOf(c.seekSeconds).coerceAtLeast(0); vm.updateCfg(c.copy(seekSeconds=v[(i+1)%v.size])) } }
-            item { SettingRow("Autoplay next episode", onOff(c.autoNext)) { vm.updateCfg(c.copy(autoNext = !c.autoNext)) } }
+                item { SettingRow("Autoplay next episode", onOff(c.autoNext)) { vm.updateCfg(c.copy(autoNext = !c.autoNext)) } }
                 item { SettingRow("Connect as (user agent)", pick(AGENTS, c.ua)) { vm.updateCfg(c.copy(ua = (c.ua + 1) % AGENTS.size)) } }
 
                 item { SectionTitle("Layout") }
@@ -770,6 +1052,7 @@ fun SettingsScreen(vm: Vm) {
                 item { SettingRow("Card titles", if (c.titles) "Always" else "Only when focused") { vm.updateCfg(c.copy(titles = !c.titles)) } }
                 item { SettingRow("Continue watching row", onOff(c.contRow)) { vm.updateCfg(c.copy(contRow = !c.contRow)) } }
                 item { SettingRow("Recently added row", onOff(c.recentRow)) { vm.updateCfg(c.copy(recentRow = !c.recentRow)) } }
+                item { SettingRow("Find missing posters and details online", onOff(c.meta)) { vm.updateCfg(c.copy(meta = !c.meta)) } }
                 item { SectionTitle("Interface") }
                 item { SettingRow("Start on", pick(STARTS, c.startTab)) { vm.updateCfg(c.copy(startTab = (c.startTab + 1) % STARTS.size)) } }
                 item { SettingRow("Sort lists", pick(SORTS, c.sort)) { vm.updateCfg(c.copy(sort = (c.sort + 1) % SORTS.size)) } }
