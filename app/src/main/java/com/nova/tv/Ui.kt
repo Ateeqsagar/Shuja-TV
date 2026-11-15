@@ -525,7 +525,7 @@ fun Home(vm: Vm) {
         if (pendingFocus && lib != null) {
             repeat(30) {
                 delay(100)
-                val ok = try { contentFr.requestFocus() } catch (e: Exception) { false }
+                val ok = try { contentFr.requestFocus(); true } catch (e: Exception) { false }
                 if (ok) { pendingFocus = false; return@LaunchedEffect }
             }
             pendingFocus = false
