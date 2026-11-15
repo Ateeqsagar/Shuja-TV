@@ -1,6 +1,7 @@
 package com.nova.tv
 
 import android.content.Context
+import android.content.pm.PackageManager
 import android.os.Build
 import android.os.SystemClock
 import android.view.inputmethod.InputMethodManager
@@ -39,6 +40,10 @@ import androidx.compose.ui.graphics.*
 import androidx.compose.ui.input.key.*
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.painterResource
@@ -441,6 +446,13 @@ fun MenuDialog(vm: Vm, m: MenuTarget) {
 
 // ---------------- screens ----------------
 
+/** True on Android TV / set-top boxes (remote control), false on phones and tablets (touch). */
+@Composable
+fun rememberIsTv(): Boolean {
+    val c = LocalContext.current
+    return remember { c.packageManager.hasSystemFeature(PackageManager.FEATURE_LEANBACK) }
+}
+
 @Composable
 fun LoginScreen(vm: Vm) {
     var mode by remember { mutableIntStateOf(0) }
@@ -451,8 +463,8 @@ fun LoginScreen(vm: Vm) {
     Box(Modifier.fillMaxSize()) {
         Image(painter = painterResource(R.drawable.logo), contentDescription = null, modifier = Modifier.padding(32.dp).size(96.dp))
         Column(
-            Modifier.align(Alignment.Center).width(500.dp).clip(RoundedCornerShape(8.dp))
-                .background(Color.Black.copy(.75f)).padding(40.dp),
+            Modifier.align(Alignment.Center).fillMaxWidth(0.92f).widthIn(max = 500.dp).clip(RoundedCornerShape(8.dp))
+                .background(Color.Black.copy(.75f)).verticalScroll(rememberScrollState()).padding(40.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             Text("Sign In", color = Color.White, fontSize = 32.sp, fontWeight = FontWeight.Bold)
@@ -762,8 +774,10 @@ fun ShelfRow(vm: Vm, title: String, list: List<Item>, cont: List<Hist>? = null) 
 }
 
 /** OK = play / open. The remote Menu key opens favorites, lock and hide. There is no long-press on cards. */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun PosterCard(vm: Vm, item: Item, onClick: () -> Unit) {
+    val tv = rememberIsTv()
     val cfg = vm.cfg
     var f by remember { mutableStateOf(false) }
     val live = item.live
@@ -800,7 +814,8 @@ fun PosterCard(vm: Vm, item: Item, onClick: () -> Unit) {
             .onPreviewKeyEvent { e ->
                 if (e.type == KeyEventType.KeyDown && e.key == Key.Menu) { vm.openMenu(item); true } else false
             }
-            .clickable(onClick = onClick)
+            // Touch: press and hold opens the menu (favorite, lock, hide). On a TV the remote's Menu key does that.
+            .combinedClickable(onClick = onClick, onLongClick = if (tv) null else ({ vm.openMenu(item) }))
     ) {
         if (mask) {
             Text("LOCKED", color = Red, fontSize = 16.sp, fontWeight = FontWeight.Black, letterSpacing = 2.sp, modifier = Modifier.align(Alignment.Center))
@@ -1010,6 +1025,7 @@ fun Intro(vm: Vm) {
         Modifier.fillMaxSize()
             .background(Brush.radialGradient(listOf(Color(0xFF3A0F2E), Color(0xFF150A12), Color.Black)))
             .focusRequester(fr).focusable()
+            .pointerInput(ready) { detectTapGestures { if (ready) vm.finishIntro() } }
             .onKeyEvent { e ->
                 val k = e.key
                 if (e.type == KeyEventType.KeyUp && ready && (k == Key.DirectionCenter || k == Key.Enter || k == Key.NumPadEnter)) {
@@ -1069,7 +1085,7 @@ fun Intro(vm: Vm) {
                 Box(Modifier.fillMaxWidth(frac).fillMaxHeight().background(Red))
             }
             Text(
-                if (ready && done < 3) "Press OK to continue now" else " ",
+                if (ready && done < 3) "Press OK or tap to continue now" else " ",
                 color = Dim, fontSize = 14.sp
             )
         }

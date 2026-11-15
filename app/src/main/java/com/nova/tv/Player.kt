@@ -5,6 +5,22 @@ import android.graphics.Bitmap
 import android.os.Build
 import android.util.LruCache
 import android.media.MediaMetadataRetriever
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.media3.common.Format
+import androidx.media3.common.PlaybackParameters
+import androidx.media3.common.TrackSelectionOverride
+import androidx.media3.common.Tracks
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -150,13 +166,18 @@ fun PlayerScreen(list: List<Item>, start: Int, vm: Vm, onExit: () -> Unit) {
         onDismissRequest = onExit,
         properties = DialogProperties(usePlatformDefaultWidth = false, dismissOnClickOutside = false)
     ) {
-        PlayerBody(list, start, vm)
+        PlayerBody(list, start, vm, onExit)
     }
 }
 
 @Composable
-private fun PlayerBody(list: List<Item>, start: Int, vm: Vm) {
+private fun PlayerBody(list: List<Item>, start: Int, vm: Vm, onExit: () -> Unit) {
     val ctx = LocalContext.current
+    val tv = rememberIsTv()
+    var isPlay by remember { mutableStateOf(true) }
+    var menuOpen by remember { mutableStateOf(false) }
+    var speed by remember { mutableFloatStateOf(1f) }
+    val okLong = remember { booleanArrayOf(false) }
     var idx by remember { mutableIntStateOf(start.coerceIn(0, list.lastIndex)) }
     val item = list[idx]
     val cur by rememberUpdatedState(item)
@@ -192,6 +213,7 @@ private fun PlayerBody(list: List<Item>, start: Int, vm: Vm) {
                 if (s == Player.STATE_READY) { error = null; tries = 0; hold = null; thumb = null }
                 if (s == Player.STATE_ENDED && !cur.live && vm.cfg.autoNext && idx + 1 < list.size) idx += 1
             }
+            override fun onPlayWhenReadyChanged(w: Boolean, r: Int) { isPlay = w }
             override fun onPlayerError(e: PlaybackException) {
                 tries++
                 val c = cur
@@ -345,6 +367,30 @@ private fun PlayerBody(list: List<Item>, start: Int, vm: Vm) {
         return idx
     }
 
+    fun seekBy(dir: Int) {
+        if (cur.live) return
+        val d = player.duration.coerceAtLeast(0L)
+        val base = scrub ?: player.currentPosition
+        scrubDir = dir
+        scrub = (base + dir * (if (dir > 0) fwdMs else backMs)).coerceIn(0L, if (d > 0L) d else Long.MAX_VALUE)
+        ping++
+    }
+
+    fun okPress() {
+        val t = scrub
+        if (t != null) {
+            player.seekTo(t)
+            pos = t
+            hold = t
+            scrub = null
+        } else if (!cur.live) {
+            player.playWhenReady = !player.playWhenReady
+        }
+        ping++
+    }
+
+    LaunchedEffect(menuOpen) { if (!menuOpen) fr.grab() }
+    val showNow by rememberUpdatedState(show)
     val mode = when (cfg.aspect) {
         1 -> AspectRatioFrameLayout.RESIZE_MODE_FILL
         2 -> AspectRatioFrameLayout.RESIZE_MODE_ZOOM
@@ -352,10 +398,31 @@ private fun PlayerBody(list: List<Item>, start: Int, vm: Vm) {
     }
 
     Box(
-        Modifier.fillMaxSize().background(Color.Black).focusRequester(fr).focusable().onPreviewKeyEvent { e ->
+        Modifier.fillMaxSize().background(Color.Black).focusRequester(fr).focusable()
+            // Touch: tap shows or hides the controls; double-tap the left or right half to jump back or forward.
+            .pointerInput(idx) {
+                detectTapGestures(
+                    onTap = { val shown = showNow; if (shown) show = false; if (!shown) ping++ },
+                    onDoubleTap = { o -> if (!cur.live) seekBy(if (o.x > size.width / 2f) 1 else -1) }
+                )
+            }
+            .onPreviewKeyEvent { e ->
             val k = e.key
             val dpad = k == Key.DirectionUp || k == Key.DirectionDown || k == Key.DirectionLeft ||
                 k == Key.DirectionRight || k == Key.DirectionCenter || k == Key.Enter || k == Key.NumPadEnter
+            val isOk = k == Key.DirectionCenter || k == Key.Enter || k == Key.NumPadEnter
+            if (isOk) {
+                if (e.type == KeyEventType.KeyDown) {
+                    okLong[0] = e.nativeKeyEvent.repeatCount > 0
+                    return@onPreviewKeyEvent true
+                }
+                if (e.type == KeyEventType.KeyUp) {
+                    val wasLong = okLong[0]
+                    okLong[0] = false
+                    if (wasLong) { menuOpen = true; ping++ } else okPress()
+                    return@onPreviewKeyEvent true
+                }
+            }
             if (e.type != KeyEventType.KeyDown) return@onPreviewKeyEvent dpad
             when (k) {
                 Key.DirectionUp, Key.ChannelUp -> { if (item.live) idx = step(1); ping++; true }
@@ -377,19 +444,8 @@ private fun PlayerBody(list: List<Item>, start: Int, vm: Vm) {
                     }
                     ping++; true
                 }
-                Key.DirectionCenter, Key.Enter, Key.NumPadEnter, Key.MediaPlayPause -> {
-                    val t = scrub
-                    if (t != null) {
-                        player.seekTo(t)
-                        pos = t
-                        hold = t
-                        scrub = null
-                    } else if (!item.live) {
-                        player.playWhenReady = !player.playWhenReady
-                    }
-                    ping++; true
-                }
-                Key.Menu -> { vm.updateCfg(vm.cfg.copy(aspect = (vm.cfg.aspect + 1) % 3)); ping++; true }
+                Key.MediaPlayPause -> { okPress(); true }
+                Key.Menu -> { menuOpen = true; ping++; true }
                 else -> false
             }
         }
@@ -423,6 +479,32 @@ private fun PlayerBody(list: List<Item>, start: Int, vm: Vm) {
                 Spacer(Modifier.weight(edge))
                 SeekCard(thumb, sc, player.currentPosition, total, scrub == null)
                 Spacer(Modifier.weight(1f - edge))
+            }
+        }
+
+        if (menuOpen) {
+            PlayerSettings(
+                player = player, vm = vm, live = item.live, title = item.name, speed = speed,
+                onSpeed = { v -> speed = v; player.playbackParameters = PlaybackParameters(v) },
+                onClose = { menuOpen = false; ping++ }
+            )
+        }
+
+        if (!tv) {
+            AnimatedVisibility(show, Modifier.align(Alignment.Center), enter = fadeIn(), exit = fadeOut()) {
+                Row(horizontalArrangement = Arrangement.spacedBy(24.dp), verticalAlignment = Alignment.CenterVertically) {
+                    if (!item.live) {
+                        TouchBtn("«  ${backMs / 1000}s", 60) { seekBy(-1) }
+                        TouchBtn(if (isPlay) "❚❚" else "▶", 80) { player.playWhenReady = !player.playWhenReady; ping++ }
+                        TouchBtn("${fwdMs / 1000}s  »", 60) { seekBy(1) }
+                    } else {
+                        TouchBtn("‹  Previous", 60) { idx = step(-1); ping++ }
+                        TouchBtn("Next  ›", 60) { idx = step(1); ping++ }
+                    }
+                }
+            }
+            AnimatedVisibility(show, Modifier.align(Alignment.TopEnd).padding(20.dp), enter = fadeIn(), exit = fadeOut()) {
+                TouchBtn("✕", 48) { onExit() }
             }
         }
 
@@ -461,17 +543,47 @@ private fun PlayerBody(list: List<Item>, start: Int, vm: Vm) {
                     } else {
                         val shownPos = scrub ?: pos
                         val frac = if (dur > 0) (shownPos.toFloat() / dur).coerceIn(0f, 1f) else 0f
-                        Box(Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp)).background(Color.White.copy(.2f))) {
-                            Box(Modifier.fillMaxWidth(frac).fillMaxHeight().background(RedBrush))
+                        // Touch: tap or drag on the bar to jump to that point.
+                        Box(
+                            Modifier.fillMaxWidth().height(26.dp)
+                                .pointerInput(dur) {
+                                    detectTapGestures { o -> if (dur > 0L) { scrubDir = if (o.x / size.width * dur > pos) 1 else -1; scrub = (o.x / size.width * dur).toLong().coerceIn(0L, dur); ping++ } }
+                                }
+                                .pointerInput(dur) {
+                                    detectHorizontalDragGestures { change, _ ->
+                                        if (dur > 0L) {
+                                            val t = (change.position.x / size.width * dur).toLong().coerceIn(0L, dur)
+                                            scrubDir = if (t > pos) 1 else -1
+                                            scrub = t; ping++
+                                        }
+                                    }
+                                },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Box(Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp)).background(Color.White.copy(.2f))) {
+                                Box(Modifier.fillMaxWidth(frac).fillMaxHeight().background(RedBrush))
+                            }
                         }
-                        Spacer(Modifier.height(6.dp))
+                        Spacer(Modifier.height(2.dp))
                         Text("${fmt(shownPos)} / ${fmt(dur)}", color = Dim, fontSize = 16.sp)
                     }
                 }
-                Text(
-                    if (item.live) "▲ ▼  channel     MENU  aspect" else "◀ ${backMs / 1000}s   ${fwdMs / 1000}s ▶     OK  pause     MENU  aspect",
-                    color = Dim, fontSize = 16.sp
-                )
+                Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(
+                        Modifier.clip(RoundedCornerShape(50)).background(Color.White.copy(.14f))
+                            .border(1.dp, Color.White.copy(.3f), RoundedCornerShape(50))
+                            .clickable { menuOpen = true; ping++ }.padding(horizontal = 16.dp, vertical = 9.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        GearIcon(Modifier.size(22.dp))
+                        Text("Settings", color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                    }
+                    if (tv) Text(
+                        if (item.live) "▲ ▼  channel     Hold OK  settings" else "◀ ${backMs / 1000}s   ${fwdMs / 1000}s ▶     OK  pause     Hold OK  settings",
+                        color = Dim, fontSize = 14.sp
+                    )
+                }
             }
         }
     }
@@ -516,6 +628,197 @@ private fun SeekCard(thumb: Bitmap?, target: Long, current: Long, total: Long, l
         if (total > 0L) {
             Spacer(Modifier.height(4.dp))
             Text(fmt(total), color = Dim, fontSize = 12.sp, modifier = Modifier.align(Alignment.End))
+        }
+    }
+}
+
+/** Round on-screen button for touch screens. */
+@Composable
+private fun TouchBtn(label: String, size: Int, onClick: () -> Unit) {
+    Box(
+        Modifier.height(size.dp).widthIn(min = size.dp).clip(RoundedCornerShape(50))
+            .background(Color.Black.copy(.55f)).border(1.dp, Color.White.copy(.3f), RoundedCornerShape(50))
+            .clickable(onClick = onClick).padding(horizontal = 18.dp),
+        contentAlignment = Alignment.Center
+    ) { Text(label, color = Color.White, fontSize = if (size >= 80) 24.sp else 16.sp, fontWeight = FontWeight.Bold, maxLines = 1) }
+}
+
+// ---------------- player settings popup ----------------
+
+private class TrackOpt(val group: Tracks.Group, val index: Int, val name: String, val selected: Boolean)
+
+private fun trackName(f: Format, n: Int, audio: Boolean): String {
+    val lang = f.language?.takeIf { it.isNotBlank() && it != "und" }?.let { code ->
+        val nm = java.util.Locale(code).displayLanguage
+        if (nm.isNotBlank()) nm.replaceFirstChar { it.uppercase() } else code
+    }
+    val base = f.label?.takeIf { it.isNotBlank() } ?: lang ?: "Track ${n + 1}"
+    val ch = if (audio) when (f.channelCount) { 1 -> "Mono"; 2 -> "Stereo"; 6 -> "5.1"; 8 -> "7.1"; else -> null } else null
+    return if (ch != null) "$base  ·  $ch" else base
+}
+
+private fun trackList(t: Tracks, type: Int): List<TrackOpt> {
+    val out = ArrayList<TrackOpt>()
+    for (g in t.groups) {
+        if (g.type != type) continue
+        for (i in 0 until g.length) {
+            if (!g.isTrackSupported(i)) continue
+            out.add(TrackOpt(g, i, trackName(g.getTrackFormat(i), out.size, type == C.TRACK_TYPE_AUDIO), g.isTrackSelected(i)))
+        }
+    }
+    return out
+}
+
+private val ASPECT_NAMES = listOf("Fit  (original ratio)", "Fill  (stretch to screen)", "Zoom  (crop the edges)")
+private val SPEEDS = listOf(0.5f, 0.75f, 1f, 1.25f, 1.5f, 2f)
+private fun speedName(v: Float) = if (v == 1f) "Normal" else (if (v == v.toInt().toFloat()) "${v.toInt()}x" else "${v}x")
+
+@Composable
+private fun GearIcon(modifier: Modifier = Modifier, tint: Color = Color.White) {
+    Canvas(modifier) {
+        val r = size.minDimension / 2f
+        val w = r * 0.24f
+        drawCircle(tint, radius = r * 0.5f, style = Stroke(w))
+        for (i in 0 until 8) {
+            val a = Math.toRadians(i * 45.0)
+            val dx = Math.cos(a).toFloat()
+            val dy = Math.sin(a).toFloat()
+            drawLine(
+                tint,
+                Offset(center.x + dx * r * 0.66f, center.y + dy * r * 0.66f),
+                Offset(center.x + dx * r * 0.94f, center.y + dy * r * 0.94f),
+                strokeWidth = w * 1.25f, cap = StrokeCap.Round
+            )
+        }
+    }
+}
+
+@Composable
+private fun OptRow(label: String, value: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    var f by remember { mutableStateOf(false) }
+    Row(
+        modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(if (f) Color.White else Color(0xFF242424))
+            .onFocusChanged { f = it.hasFocus }.clickable(onClick = onClick).padding(horizontal = 18.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        Text(label, color = if (f) Color.Black else Color.White, fontSize = 18.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+        if (value.isNotEmpty()) Text(value, color = if (f) Color(0xFF333333) else Dim, fontSize = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
+}
+
+/** One popup for everything about the picture and sound: aspect ratio, audio track, subtitles and speed. */
+@Composable
+private fun PlayerSettings(
+    player: ExoPlayer, vm: Vm, live: Boolean, title: String, speed: Float,
+    onSpeed: (Float) -> Unit, onClose: () -> Unit
+) {
+    var page by remember { mutableIntStateOf(0) }
+    var tick by remember { mutableIntStateOf(0) }
+    var subsOn by remember { mutableStateOf(!player.trackSelectionParameters.disabledTrackTypes.contains(C.TRACK_TYPE_TEXT)) }
+    val fr = remember { FocusRequester() }
+    DisposableEffect(player) {
+        val l = object : Player.Listener {
+            override fun onTracksChanged(tracks: Tracks) { tick++ }
+        }
+        player.addListener(l)
+        onDispose { player.removeListener(l) }
+    }
+    val tracks = remember(tick) { player.currentTracks }
+    val audio = remember(tracks) { trackList(tracks, C.TRACK_TYPE_AUDIO) }
+    val text = remember(tracks) { trackList(tracks, C.TRACK_TYPE_TEXT) }
+    val aspect = vm.cfg.aspect.coerceIn(0, 2)
+
+    fun pick(o: TrackOpt) {
+        var b = player.trackSelectionParameters.buildUpon()
+            .setOverrideForType(TrackSelectionOverride(o.group.mediaTrackGroup, listOf(o.index)))
+        if (o.group.type == C.TRACK_TYPE_TEXT) b = b.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+        player.trackSelectionParameters = b.build()
+        if (o.group.type == C.TRACK_TYPE_TEXT) {
+            subsOn = true
+            if (!vm.cfg.subs) vm.updateCfg(vm.cfg.copy(subs = true))
+        }
+    }
+    fun subsOff() {
+        player.trackSelectionParameters = player.trackSelectionParameters.buildUpon().setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true).build()
+        subsOn = false
+        if (vm.cfg.subs) vm.updateCfg(vm.cfg.copy(subs = false))
+    }
+
+    val selIdx = when (page) {
+        1 -> aspect
+        2 -> audio.indexOfFirst { it.selected }.coerceAtLeast(0)
+        3 -> if (!subsOn) 0 else (text.indexOfFirst { it.selected } + 1).coerceAtLeast(0)
+        4 -> SPEEDS.indexOf(speed).coerceAtLeast(0)
+        else -> 0
+    }
+    val listState = remember(page) { LazyListState((selIdx - 1).coerceAtLeast(0)) }
+    LaunchedEffect(page) { delay(80); fr.grab() }
+
+    Dialog(
+        onDismissRequest = { if (page != 0) page = 0 else onClose() },
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Column(
+            Modifier.width(480.dp).clip(RoundedCornerShape(16.dp)).background(Color(0xFF181818))
+                .border(1.dp, KeyBg, RoundedCornerShape(16.dp)).padding(26.dp).safeDpad(),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                GearIcon(Modifier.size(24.dp), Red)
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        when (page) { 1 -> "Aspect ratio"; 2 -> "Audio"; 3 -> "Subtitles"; 4 -> "Playback speed"; else -> "Player settings" },
+                        color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold
+                    )
+                    if (page == 0) Text(title, color = Dim, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+            }
+            LazyColumn(Modifier.heightIn(max = 300.dp), state = listState, verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                if (page == 0) {
+                    item {
+                        OptRow("Aspect ratio", ASPECT_NAMES[aspect].substringBefore("  "), Modifier.focusRequester(fr)) { page = 1 }
+                    }
+                    item {
+                        val cur = audio.firstOrNull { it.selected }
+                        OptRow("Audio", if (audio.isEmpty()) "Default" else (cur?.name ?: "Auto")) { page = 2 }
+                    }
+                    item {
+                        val cur = text.firstOrNull { it.selected }
+                        OptRow("Subtitles", if (!subsOn) "Off" else (cur?.name ?: if (text.isEmpty()) "None available" else "On")) { page = 3 }
+                    }
+                    if (!live) item { OptRow("Playback speed", speedName(speed)) { page = 4 } }
+                    item { OptRow("Close", "") { onClose() } }
+                } else {
+                    item { OptRow("‹  Back", "") { page = 0 } }
+                    when (page) {
+                        1 -> itemsIndexed(ASPECT_NAMES) { i, n ->
+                            OptRow(n, if (i == aspect) "✓" else "", if (i == selIdx) Modifier.focusRequester(fr) else Modifier) {
+                                vm.updateCfg(vm.cfg.copy(aspect = i))
+                            }
+                        }
+                        2 -> if (audio.isEmpty()) {
+                            item { Text("No other audio tracks in this stream.", color = Dim, fontSize = 16.sp, modifier = Modifier.padding(8.dp)) }
+                        } else itemsIndexed(audio) { i, o ->
+                            OptRow(o.name, if (o.selected) "✓" else "", if (i == selIdx) Modifier.focusRequester(fr) else Modifier) { pick(o) }
+                        }
+                        3 -> {
+                            item {
+                                OptRow("Off", if (!subsOn) "✓" else "", if (selIdx == 0) Modifier.focusRequester(fr) else Modifier) { subsOff() }
+                            }
+                            if (text.isEmpty()) {
+                                item { Text("No subtitles in this stream.", color = Dim, fontSize = 16.sp, modifier = Modifier.padding(8.dp)) }
+                            } else itemsIndexed(text) { i, o ->
+                                OptRow(o.name, if (subsOn && o.selected) "✓" else "", if (i + 1 == selIdx) Modifier.focusRequester(fr) else Modifier) { pick(o) }
+                            }
+                        }
+                        4 -> itemsIndexed(SPEEDS) { i, v ->
+                            OptRow(speedName(v), if (v == speed) "✓" else "", if (i == selIdx) Modifier.focusRequester(fr) else Modifier) { onSpeed(v) }
+                        }
+                        else -> {}
+                    }
+                }
+            }
         }
     }
 }
