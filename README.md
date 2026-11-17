@@ -1,4 +1,4 @@
-# Shuja TV 1.1
+# Shuja TV
 
 Android TV IPTV player (Xtream Codes) - Live TV, Movies, Series, global search, settings.
 

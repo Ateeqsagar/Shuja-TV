@@ -567,7 +567,37 @@ class Vm(app: Application) : AndroidViewModel(app) {
         if (posSp.all.size > 500) posSp.edit().clear().apply()
         viewModelScope.launch { while (true) { delay(60_000); now = System.currentTimeMillis() } }
         val h = sp.getString("h", null)
-        if (h != null) login(Account(h, sp.getString("u", "") ?: "", sp.getString("p", "") ?: "", sp.getInt("m", 0)))
+        if (h != null) restoreSession(Account(h, sp.getString("u", "") ?: "", sp.getString("p", "") ?: "", sp.getInt("m", 0)))
+    }
+
+    /**
+     * The saved login is only ever removed by Sign out. When the app starts again (even after being closed for days)
+     * the user is signed in at once; the server is contacted in the background. If the network or the server is not
+     * ready yet, the lists show "Retry" instead of throwing the user back to the Sign In screen.
+     */
+    private fun restoreSession(a: Account) {
+        account = a
+        m3uEps = emptyMap()
+        if (a.mode == 1) {
+            api = null
+            job?.cancel()
+            job = viewModelScope.launch {
+                busy = true
+                try { doConnect(a) }
+                catch (e: CancellationException) { throw e }
+                catch (e: Throwable) { val m = friendly(e); for (t in 0..2) errs[t] = m }
+                finally { busy = false }
+            }
+        } else {
+            val x = Xtream(a, ua())
+            api = x
+            startLoading()
+            viewModelScope.launch {
+                try { info = x.login() }
+                catch (e: CancellationException) { throw e }
+                catch (e: Throwable) { /* stay signed in; account details simply stay empty until the next refresh */ }
+            }
+        }
     }
 
     fun ua(): String = when (cfg.ua) {
@@ -610,7 +640,9 @@ class Vm(app: Application) : AndroidViewModel(app) {
         connect(a)
     }
 
-    private fun connect(a: Account) = run {
+    private fun connect(a: Account) = run { doConnect(a) }
+
+    private suspend fun doConnect(a: Account) {
         val firstSignIn = account == null
         if (a.mode == 1) {
             val data = M3u.load(a.host.trim(), ua())
@@ -628,7 +660,7 @@ class Vm(app: Application) : AndroidViewModel(app) {
             api = x; account = a; info = i; m3uEps = emptyMap()
             libs.clear(); errs.clear(); loadingSet.clear(); loadingTypes = emptySet()
         }
-        sp.edit().putString("h", a.host).putString("u", a.user).putString("p", a.pass).putInt("m", a.mode).apply()
+        sp.edit().putString("h", a.host).putString("u", a.user).putString("p", a.pass).putInt("m", a.mode).commit()
         lastLoad = System.currentTimeMillis()
         if (firstSignIn) showIntro = true
         if (a.mode == 0) startLoading()

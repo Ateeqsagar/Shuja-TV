@@ -124,6 +124,37 @@ fun Modifier.safeDpad(): Modifier {
     }
 }
 
+/**
+ * TV remote: OK = normal click, hold OK for about half a second = options menu (replaces the Menu key,
+ * which many remotes do not have). The menu opens when the key is released, so the held key can never
+ * click something inside the menu by accident. The Menu key still works too.
+ */
+@Composable
+fun Modifier.okHold(onHold: () -> Unit, onTap: () -> Unit): Modifier {
+    val down = remember { booleanArrayOf(false, false) } // [0] key went down on this item, [1] held long
+    return this.onPreviewKeyEvent { e ->
+        val k = e.key
+        if (k == Key.Menu && e.type == KeyEventType.KeyDown) {
+            onHold()
+            true
+        } else if (k == Key.DirectionCenter || k == Key.Enter || k == Key.NumPadEnter) {
+            if (e.type == KeyEventType.KeyDown) {
+                if (!down[0]) { down[0] = true; down[1] = false }
+                if (e.nativeKeyEvent.repeatCount > 0) down[1] = true
+                true
+            } else if (e.type == KeyEventType.KeyUp) {
+                if (down[0]) {
+                    val ne = e.nativeKeyEvent
+                    val long = down[1] || ne.eventTime - ne.downTime >= 550L
+                    down[0] = false; down[1] = false
+                    if (long) onHold() else onTap()
+                }
+                true
+            } else false
+        } else false
+    }
+}
+
 @Composable
 fun NovaApp(vm: Vm, onExit: () -> Unit) {
     Box(Modifier.fillMaxSize().background(Bg).safeDpad()) {
@@ -702,8 +733,8 @@ fun CatRow(title: String, count: Int, selected: Boolean, pinned: Boolean, onMenu
         Modifier.fillMaxWidth().clip(RoundedCornerShape(6.dp))
             .background(if (f) Color.White else if (selected) KeyBg else Color.Transparent)
             .onFocusChanged { f = it.hasFocus; if (it.hasFocus) onFocus() }
-            // Remote: Menu key. Touch: press and hold. Both open the pin menu.
-            .onPreviewKeyEvent { e -> if (e.type == KeyEventType.KeyDown && e.key == Key.Menu) { onMenu(); true } else false }
+            // Remote: hold OK (or Menu key). Touch: press and hold. Both open the pin menu.
+            .okHold(onHold = onMenu, onTap = onClick)
             .combinedClickable(onClick = onClick, onLongClick = if (tv) null else onMenu)
             .padding(horizontal = 14.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -835,7 +866,7 @@ fun ShelfRow(vm: Vm, title: String, list: List<Item>, cont: List<Hist>? = null, 
     }
 }
 
-/** OK = play / open. The remote Menu key opens favorites, lock and hide. There is no long-press on cards. */
+/** OK = play / open. Hold OK (or the Menu key) opens favorites, lock and hide. */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun PosterCard(vm: Vm, item: Item, onClick: () -> Unit) {
@@ -873,10 +904,8 @@ fun PosterCard(vm: Vm, item: Item, onClick: () -> Unit) {
             .clip(shape).background(Panel)
             .border(3.dp, if (f) Color.White else Color.Transparent, shape)
             .onFocusChanged { f = it.hasFocus }
-            .onPreviewKeyEvent { e ->
-                if (e.type == KeyEventType.KeyDown && e.key == Key.Menu) { vm.openMenu(item); true } else false
-            }
-            // Touch: press and hold opens the menu (favorite, lock, hide). On a TV the remote's Menu key does that.
+            // Remote: hold OK (or Menu key) opens the menu (favorite, lock, hide). Touch: press and hold.
+            .okHold(onHold = { vm.openMenu(item) }, onTap = onClick)
             .combinedClickable(onClick = onClick, onLongClick = if (tv) null else ({ vm.openMenu(item) }))
     ) {
         if (mask) {
@@ -1067,13 +1096,18 @@ fun Intro(vm: Vm) {
     val ready = signedIn && st(tab) >= 2
     var minDone by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { delay(1800); minDone = true }
-    LaunchedEffect(done, ready, minDone, signedIn) {
+    val tabFailed = signedIn && st(tab) == 3
+    LaunchedEffect(done, ready, minDone, signedIn, tabFailed) {
         if (signedIn && minDone) {
             if (done == 3) {
                 delay(600)
                 vm.finishIntro()
             } else if (ready) {
                 delay(8000)
+                vm.finishIntro()
+            } else if (tabFailed) {
+                // No network yet or server busy: go to the lists, which show a Retry button. Never back to Sign In.
+                delay(2500)
                 vm.finishIntro()
             }
         }
@@ -1159,8 +1193,8 @@ fun Intro(vm: Vm) {
 @Composable
 fun SectionTitle(title: String) {
     Text(
-        title.uppercase(), color = Red, fontSize = 14.sp, fontWeight = FontWeight.Bold, letterSpacing = 2.sp,
-        modifier = Modifier.padding(top = 18.dp, bottom = 2.dp)
+        title.uppercase(), color = Color(0xFFFF6A3D), fontSize = 14.sp, fontWeight = FontWeight.Bold, letterSpacing = 2.sp,
+        modifier = Modifier.padding(top = 20.dp, bottom = 4.dp, start = 4.dp)
     )
 }
 
@@ -1168,7 +1202,7 @@ fun SectionTitle(title: String) {
 fun SettingRow(label: String, value: String, onClick: () -> Unit) {
     var f by remember { mutableStateOf(false) }
     Row(
-        Modifier.fillMaxWidth().clip(RoundedCornerShape(6.dp)).background(if (f) Color.White else Panel)
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).background(if (f) Color.White else Color.White.copy(alpha = 0.07f))
             .onFocusChanged { f = it.hasFocus }.clickable(onClick = onClick).padding(horizontal = 20.dp, vertical = 13.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(16.dp)
@@ -1200,10 +1234,41 @@ fun SettingsScreen(vm: Vm) {
     fun toast(s: String) { Toast.makeText(ctx, s, Toast.LENGTH_SHORT).show() }
 
     FullDialog({ vm.settingsOpen = false }) {
-        Column(Modifier.fillMaxSize().padding(horizontal = 64.dp, vertical = 24.dp)) {
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        var confirmOut by remember { mutableStateOf(false) }
+        Row(
+            Modifier.fillMaxSize()
+                .background(Brush.radialGradient(listOf(Color(0xFF3A0F2E), Color(0xFF150A12), Color.Black)))
+        ) {
+            // Left: the app logo, centred, like a professional TV app.
+            Column(
+                Modifier.weight(0.36f).fillMaxHeight().padding(horizontal = 32.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
+                Image(painter = painterResource(R.drawable.logo), contentDescription = null, modifier = Modifier.size(170.dp))
+                Spacer(Modifier.height(18.dp))
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("Shuja", color = Color.White, fontSize = 40.sp, fontWeight = FontWeight.Black)
+                    Text(
+                        "TV", color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.Black,
+                        modifier = Modifier.clip(RoundedCornerShape(8.dp)).background(Red).padding(horizontal = 12.dp, vertical = 2.dp)
+                    )
+                }
+                Spacer(Modifier.height(8.dp))
+                Text("WATCH   •   ENJOY   •   MORE", color = Dim, fontSize = 12.sp, letterSpacing = 3.sp, textAlign = TextAlign.Center)
+                Spacer(Modifier.height(14.dp))
+                Text("Version $APP_VERSION", color = Dim, fontSize = 14.sp)
+                Spacer(Modifier.height(28.dp))
+                Text(
+                    "Tip: hold OK on any channel, movie or series for options (favorite, lock, hide).",
+                    color = Dim.copy(alpha = 0.8f), fontSize = 13.sp, textAlign = TextAlign.Center
+                )
+            }
+            // Right: the settings list on a soft glass panel.
+            Column(Modifier.weight(0.64f).fillMaxHeight().padding(top = 24.dp, bottom = 24.dp, end = 48.dp)) {
+            Row(Modifier.fillMaxWidth().padding(bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text("Settings", color = Color.White, fontSize = 32.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
-                Btn("Close", Modifier.focusRequester(fr), fill = KeyBg, fontSize = 18.sp) { vm.settingsOpen = false }
+                Btn("Close", Modifier.focusRequester(fr), fill = GlassBtn, fontSize = 18.sp) { vm.settingsOpen = false }
             }
             LazyColumn(Modifier.weight(1f).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 item { SectionTitle("Account") }
@@ -1222,7 +1287,11 @@ fun SettingsScreen(vm: Vm) {
                     item { SettingRow("Connections", "${vm.info.activeCons.ifBlank { "0" }} of ${vm.info.maxCons.ifBlank { "?" }} in use") {} }
                 }
                 item { SettingRow("Refresh all content", "Reload lists") { vm.refreshAll(); toast("Reloading content") } }
-                item { SettingRow("Sign out", "") { vm.logout() } }
+                item {
+                    SettingRow(if (confirmOut) "Press OK again to sign out" else "Sign out", if (confirmOut) "Tap elsewhere to cancel" else "") {
+                        if (confirmOut) vm.logout() else confirmOut = true
+                    }
+                }
 
                 item { SectionTitle("Playback") }
                 item { SettingRow("Live stream format", pick(FORMATS, c.liveFormat)) { vm.updateCfg(c.copy(liveFormat = (c.liveFormat + 1) % FORMATS.size)) } }
@@ -1233,7 +1302,7 @@ fun SettingsScreen(vm: Vm) {
                 item { SettingRow("Subtitles", onOff(c.subs)) { vm.updateCfg(c.copy(subs = !c.subs)) } }
                 item { SettingRow("Skip forward (right button)", "${SEEK_STEPS[c.seekF]} seconds") { vm.updateCfg(c.copy(seekF = (c.seekF + 1) % SEEK_STEPS.size)) } }
                 item { SettingRow("Skip back (left button)", "${SEEK_STEPS[c.seekB]} seconds") { vm.updateCfg(c.copy(seekB = (c.seekB + 1) % SEEK_STEPS.size)) } }
-                item { SettingRow("Seek preview picture", onOff(c.preview)) { vm.updateCfg(c.copy(preview = !c.preview)) } }
+                item { SettingRow("Live seek preview (Netflix style)", onOff(c.preview)) { vm.updateCfg(c.copy(preview = !c.preview)) } }
                 item { SettingRow("Resume where you left off", onOff(c.resume)) { vm.updateCfg(c.copy(resume = !c.resume)) } }
                 item { SettingRow("Autoplay next episode", onOff(c.autoNext)) { vm.updateCfg(c.copy(autoNext = !c.autoNext)) } }
                 item { SettingRow("Connect as (user agent)", pick(AGENTS, c.ua)) { vm.updateCfg(c.copy(ua = (c.ua + 1) % AGENTS.size)) } }
@@ -1280,6 +1349,7 @@ fun SettingsScreen(vm: Vm) {
                     val max = rt.maxMemory() / 1048576
                     SettingRow("About", "Shuja TV $APP_VERSION  |  ${Build.MODEL}  |  Android ${Build.VERSION.RELEASE}  |  ${used}/${max} MB") {}
                 }
+            }
             }
         }
         LaunchedEffect(Unit) { fr.grab() }

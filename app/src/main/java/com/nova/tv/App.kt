@@ -38,6 +38,15 @@ class App : Application(), ImageLoaderFactory {
             .build()
     }
 
+    /** Disk cache for movies and episodes (384 MB): rewinds, replays and resume start instantly and cost no download. */
+    val mediaCache: androidx.media3.datasource.cache.SimpleCache by lazy {
+        androidx.media3.datasource.cache.SimpleCache(
+            cacheDir.resolve("media"),
+            androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor(384L * 1024 * 1024),
+            androidx.media3.database.StandaloneDatabaseProvider(this)
+        )
+    }
+
     /** One shared state for the whole life of the app process, so reopening the app does not reload everything. */
     val vm: Vm by lazy { Vm(this) }
 
