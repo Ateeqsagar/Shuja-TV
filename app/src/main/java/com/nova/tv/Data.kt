@@ -123,8 +123,11 @@ data class Cfg(
     val seekF: Int = 1,
     val seekB: Int = 1,
     val meta: Boolean = true,
-    val preview: Boolean = true
-)
+    // 0 = off, 1 = on (skipped on accounts with only 1 connection), 2 = always on
+    val previewMode: Int = 1
+) {
+    val preview: Boolean get() = previewMode != 0
+}
 
 fun loadCfg(sp: SharedPreferences): Cfg {
     val d = Cfg()
@@ -152,7 +155,7 @@ fun loadCfg(sp: SharedPreferences): Cfg {
         seekF = sp.getInt("seekF", d.seekF).coerceIn(0, SEEK_STEPS.lastIndex),
         seekB = sp.getInt("seekB", d.seekB).coerceIn(0, SEEK_STEPS.lastIndex),
         meta = sp.getBoolean("meta", d.meta),
-        preview = sp.getBoolean("preview", d.preview)
+        previewMode = sp.getInt("pvMode", if (sp.getBoolean("preview", true)) 1 else 0).coerceIn(0, 2)
     )
 }
 
@@ -165,7 +168,7 @@ fun saveCfg(sp: SharedPreferences, c: Cfg) {
         .putBoolean("epg", c.epg).putBoolean("anim", c.anim).putBoolean("hideAdult", c.hideAdult)
         .putInt("layout", c.layout).putInt("cardSize", c.cardSize).putBoolean("titles", c.titles)
         .putBoolean("contRow", c.contRow).putBoolean("recentRow", c.recentRow)
-        .putInt("seekF", c.seekF).putInt("seekB", c.seekB).putBoolean("meta", c.meta).putBoolean("preview", c.preview)
+        .putInt("seekF", c.seekF).putInt("seekB", c.seekB).putBoolean("meta", c.meta).putInt("pvMode", c.previewMode).putBoolean("preview", c.previewMode != 0)
         .apply()
 }
 

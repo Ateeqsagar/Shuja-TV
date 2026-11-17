@@ -1213,6 +1213,7 @@ fun SettingRow(label: String, value: String, onClick: () -> Unit) {
 }
 
 private fun onOff(b: Boolean) = if (b) "On" else "Off"
+private val PREVIEW_MODES = listOf("Off", "On", "On (even with 1 connection)")
 private fun pick(list: List<String>, i: Int) = list[i.coerceIn(0, list.lastIndex)]
 
 private val FORMATS = listOf("HLS (m3u8)", "MPEG-TS")
@@ -1302,7 +1303,7 @@ fun SettingsScreen(vm: Vm) {
                 item { SettingRow("Subtitles", onOff(c.subs)) { vm.updateCfg(c.copy(subs = !c.subs)) } }
                 item { SettingRow("Skip forward (right button)", "${SEEK_STEPS[c.seekF]} seconds") { vm.updateCfg(c.copy(seekF = (c.seekF + 1) % SEEK_STEPS.size)) } }
                 item { SettingRow("Skip back (left button)", "${SEEK_STEPS[c.seekB]} seconds") { vm.updateCfg(c.copy(seekB = (c.seekB + 1) % SEEK_STEPS.size)) } }
-                item { SettingRow("Live seek preview (Netflix style)", onOff(c.preview)) { vm.updateCfg(c.copy(preview = !c.preview)) } }
+                item { SettingRow("Live seek preview (Netflix style)", PREVIEW_MODES[c.previewMode.coerceIn(0, 2)]) { vm.updateCfg(c.copy(previewMode = (c.previewMode + 1) % PREVIEW_MODES.size)) } }
                 item { SettingRow("Resume where you left off", onOff(c.resume)) { vm.updateCfg(c.copy(resume = !c.resume)) } }
                 item { SettingRow("Autoplay next episode", onOff(c.autoNext)) { vm.updateCfg(c.copy(autoNext = !c.autoNext)) } }
                 item { SettingRow("Connect as (user agent)", pick(AGENTS, c.ua)) { vm.updateCfg(c.copy(ua = (c.ua + 1) % AGENTS.size)) } }

@@ -215,10 +215,13 @@ private fun PlayerBody(list: List<Item>, start: Int, vm: Vm, onExit: () -> Unit)
     var pvFailed by remember { mutableStateOf(false) }
     // Many providers allow one connection only; a second stream would cut the movie, so no live preview then.
     val oneConn = vm.info.maxCons.trim().toIntOrNull() == 1
-    val previewOk = cfg.preview && !item.live && !pvFailed && !oneConn
+    // Off: never. On: skipped when the account allows only 1 connection. Always: tried anyway.
+    val previewOk = cfg.previewMode != 0 && !item.live && !pvFailed && !(oneConn && cfg.previewMode == 1)
+    var pvFrame by remember { mutableStateOf(false) }
     val pvListener = remember {
         object : Player.Listener {
             override fun onPlaybackStateChanged(s: Int) { pvBusy = s == Player.STATE_BUFFERING }
+            override fun onRenderedFirstFrame() { pvFrame = true }
             override fun onPlayerError(e: PlaybackException) { pvFailed = true }
         }
     }
@@ -226,6 +229,7 @@ private fun PlayerBody(list: List<Item>, start: Int, vm: Vm, onExit: () -> Unit)
         val p = pv ?: return
         pv = null
         pvBusy = false
+        pvFrame = false
         try { p.removeListener(pvListener); p.release() } catch (e: Exception) { }
     }
     fun ensurePreview(): ExoPlayer? {
@@ -360,8 +364,23 @@ private fun PlayerBody(list: List<Item>, start: Int, vm: Vm, onExit: () -> Unit)
     // The second connection is closed soon after the jump is finished.
     LaunchedEffect(scrub, hold, idx) {
         if (scrub == null && hold == null) {
-            delay(5000)
+            delay(120_000)
             releasePreview()
+        }
+    }
+    // Open the preview player ahead of time (as soon as the video plays or the controls appear),
+    // so the very first jump already shows a real picture instead of black.
+    LaunchedEffect(ping, idx, previewOk, buffering) {
+        if (previewOk && pv == null && !item.live && !buffering) {
+            delay(600)
+            if (player.playbackState == Player.STATE_READY) ensurePreview()
+        }
+    }
+    // If the preview never produces a picture (decoder busy, server refuses), stop trying and use the simple time label.
+    LaunchedEffect(pv) {
+        if (pv != null) {
+            delay(12_000)
+            if (!pvFrame && pv != null) pvFailed = true
         }
     }
     LaunchedEffect(ping) { show = true; delay(4000); show = false }
@@ -520,8 +539,9 @@ private fun PlayerBody(list: List<Item>, start: Int, vm: Vm, onExit: () -> Unit)
                     tv = tv,
                     jumping = sc != null,
                     landing = scrub == null,
-                    preview = if (sc != null && cfg.preview) pv else null,
+                    preview = if (sc != null && previewOk) pv else null,
                     previewBusy = pvBusy,
+                    previewFrame = pvFrame,
                     previewOn = previewOk,
                     onBack = onExit,
                     onToggle = { togglePlay() },
@@ -649,7 +669,7 @@ private fun PlayerBody(list: List<Item>, start: Int, vm: Vm, onExit: () -> Unit)
 private fun NfControls(
     title: String, playing: Boolean, buffering: Boolean, shownPos: Long, dur: Long, realPos: Long,
     backSec: Int, fwdSec: Int, speedText: String, hasNext: Boolean, tv: Boolean,
-    jumping: Boolean, landing: Boolean, preview: ExoPlayer?, previewBusy: Boolean, previewOn: Boolean,
+    jumping: Boolean, landing: Boolean, preview: ExoPlayer?, previewBusy: Boolean, previewFrame: Boolean, previewOn: Boolean,
     onBack: () -> Unit, onToggle: () -> Unit, onSkip: (Int) -> Unit, onSeekFrac: (Float) -> Unit,
     onOpen: (Int) -> Unit, onNext: () -> Unit
 ) {
@@ -720,10 +740,19 @@ private fun NfControls(
                     Box(Modifier.align(Alignment.CenterStart).offset(x = w * frac - knob / 2).size(knob).clip(CircleShape).background(Red))
                     if (jumping) {
                         // Preview follows the knob, like Netflix: same place above the bar, centred on the jump target.
-                        val cw = 240.dp
-                        val cx = (w * frac - cw / 2).coerceIn(0.dp, (w - cw).coerceAtLeast(0.dp))
-                        Box(Modifier.align(Alignment.TopStart).offset(x = cx, y = -(181.dp))) {
-                            NfPreview(preview, previewBusy, shownPos, realPos, landing, previewOn)
+                        if (previewOn) {
+                            val cw = 240.dp
+                            val cx = (w * frac - cw / 2).coerceIn(0.dp, (w - cw).coerceAtLeast(0.dp))
+                            Box(Modifier.align(Alignment.TopStart).offset(x = cx, y = -(181.dp))) {
+                                NfPreview(preview, previewBusy, previewFrame, shownPos, realPos, landing)
+                            }
+                        } else {
+                            // Preview is off (or not possible): only a small time label above the knob.
+                            val cw = 120.dp
+                            val cx = (w * frac - cw / 2).coerceIn(0.dp, (w - cw).coerceAtLeast(0.dp))
+                            Box(Modifier.align(Alignment.TopStart).offset(x = cx, y = -(48.dp)).width(cw)) {
+                                SeekChip(shownPos, realPos)
+                            }
                         }
                     }
                 }
@@ -758,7 +787,7 @@ private fun NfOpt(text: String, onClick: () -> Unit) {
 
 /** Preview above the bar: the real frame at the jump target (second small player), the time, and how far we jump. */
 @Composable
-private fun NfPreview(p: ExoPlayer?, busy: Boolean, target: Long, current: Long, landing: Boolean, previewOn: Boolean) {
+private fun NfPreview(p: ExoPlayer?, busy: Boolean, frame: Boolean, target: Long, current: Long, landing: Boolean) {
     val delta = (target - current) / 1000L
     val fwd = delta >= 0L
     val a = if (delta < 0L) -delta else delta
@@ -783,16 +812,28 @@ private fun NfPreview(p: ExoPlayer?, busy: Boolean, target: Long, current: Long,
                     update = { v -> if (v.player !== p) v.player = p },
                     onRelease = { v -> v.player = null }
                 )
-                if (busy) {
-                    Box(Modifier.fillMaxSize().background(Color.Black.copy(.35f)), contentAlignment = Alignment.Center) {
-                        CircularProgressIndicator(Modifier.size(30.dp), color = Color.White, strokeWidth = 3.dp)
+                if (!frame) {
+                    // Nothing has been drawn yet: cover the (still black) video surface with the card background.
+                    Box(
+                        Modifier.fillMaxSize().background(Brush.linearGradient(listOf(Color(0xFF2A1220), Color(0xFF14090F)))),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            CircularProgressIndicator(Modifier.size(30.dp), color = Color.White, strokeWidth = 3.dp)
+                            Spacer(Modifier.height(6.dp))
+                            Text(if (landing) "Jumping…" else "Loading preview", color = Dim, fontSize = 13.sp)
+                        }
+                    }
+                } else if (busy) {
+                    Box(Modifier.fillMaxSize().background(Color.Black.copy(.3f)), contentAlignment = Alignment.Center) {
+                        CircularProgressIndicator(Modifier.size(26.dp), color = Color.White, strokeWidth = 3.dp)
                     }
                 }
             } else {
                 Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
                     Text(if (fwd) "»" else "«", color = accent, fontSize = 44.sp, fontWeight = FontWeight.Black)
                     Text(
-                        if (landing) "Jumping…" else if (previewOn) "Loading preview" else if (fwd) "Skipping ahead" else "Going back",
+                        if (landing) "Jumping…" else "Loading preview",
                         color = Dim, fontSize = 13.sp
                     )
                 }
@@ -1048,5 +1089,23 @@ private fun PlayerSettings(
                 }
             }
         }
+    }
+}
+
+/** Small time label shown above the knob when the picture preview is off. */
+@Composable
+private fun SeekChip(target: Long, current: Long) {
+    val delta = (target - current) / 1000L
+    val fwd = delta >= 0L
+    val a = if (delta < 0L) -delta else delta
+    val dText = if (a >= 60L) "${a / 60}m ${a % 60}s" else "${a}s"
+    val accent = if (fwd) Color(0xFF46D369) else Color(0xFFE87C03)
+    Column(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(Color.Black.copy(.78f))
+            .border(1.dp, Color.White.copy(.35f), RoundedCornerShape(8.dp)).padding(vertical = 6.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text(fmt(target), color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+        Text(if (fwd) "+$dText" else "-$dText", color = accent, fontSize = 13.sp, fontWeight = FontWeight.Bold)
     }
 }
