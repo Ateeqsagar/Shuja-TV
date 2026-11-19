@@ -501,7 +501,7 @@ fun friendly(e: Throwable): String = when (e) {
     else -> e.message ?: "Network error"
 }
 
-class Vm(app: Application) : AndroidViewModel(app) {
+class Vm(private val app: Application) : AndroidViewModel(app) {
     private val sp = app.getSharedPreferences("nova", 0)
     private val cfgSp = app.getSharedPreferences("nova_cfg", 0)
     // ---- profiles: the first profile ("main") keeps the old storage names, so nothing is lost ----
