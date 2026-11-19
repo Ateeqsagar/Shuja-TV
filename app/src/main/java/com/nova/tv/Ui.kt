@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.grid.itemsIndexed as gridItemsIndexed
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
@@ -767,8 +768,11 @@ fun Home(vm: Vm) {
                 SearchResults(vm, res, q)
             } else if (lib != null) {
                 key(tab, cfg.layout) {
-                    if (cfg.layout == 1) GridLayout(vm, sections)
-                    else Shelves(vm, sections, rows.firstOrNull())
+                    when (cfg.layout) {
+                        1 -> GridLayout(vm, sections)
+                        2 -> GroupsGrid(vm, sections)
+                        else -> Shelves(vm, sections, rows.firstOrNull())
+                    }
                 }
             } else {
                 val err = vm.errs[tab]
@@ -873,6 +877,141 @@ fun GridLayout(vm: Vm, sections: List<Section>) {
                     val c = sec.cont
                     if (c != null) vm.resumeHist(c[i]) else vm.open(sec.items, i)
                 }
+            }
+        }
+    }
+}
+
+/** One tile of the groups grid: a small collage of posters/logos from the group, its name and item count. */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+fun GroupTile(vm: Vm, sec: Section, modifier: Modifier, onMenu: () -> Unit, onClick: () -> Unit) {
+    val tv = rememberIsTv()
+    var f by remember { mutableStateOf(false) }
+    val s by animateFloatAsState(if (f && vm.cfg.anim) 1.05f else 1f, tween(110), label = "gs")
+    val shape = RoundedCornerShape(8.dp)
+    val live = vm.tab == T_LIVE
+    val icons = remember(sec.items) { sec.items.asSequence().filter { it.icon != null && !vm.isLocked(it) }.take(4).map { it.icon!! }.toList() }
+    Box(
+        modifier.aspectRatio(4f / 3f)
+            .zIndex(if (f) 1f else 0f).graphicsLayer { scaleX = s; scaleY = s }
+            .clip(shape).background(Panel)
+            .border(3.dp, if (f) Color.White else Color.Transparent, shape)
+            .onFocusChanged { f = it.hasFocus }
+            .okHold(onHold = onMenu, onTap = onClick)
+            .combinedClickable(onClick = onClick, onLongClick = if (tv) null else onMenu)
+    ) {
+        if (icons.isNotEmpty()) {
+            Column(Modifier.fillMaxSize()) {
+                for (r in 0 until 2) {
+                    Row(Modifier.weight(1f).fillMaxWidth()) {
+                        for (c in 0 until 2) {
+                            val u = icons.getOrNull(r * 2 + c)
+                            Box(Modifier.weight(1f).fillMaxHeight().background(if ((r + c) % 2 == 0) Panel else KeyBg.copy(alpha = .6f))) {
+                                if (u != null) AsyncImage(
+                                    model = u, contentDescription = null,
+                                    contentScale = if (live) ContentScale.Fit else ContentScale.Crop,
+                                    modifier = Modifier.fillMaxSize().then(if (live) Modifier.padding(8.dp) else Modifier)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Box(Modifier.matchParentSize().background(Brush.verticalGradient(listOf(Color.Transparent, Color.Transparent, Color(0xEE000000)))))
+        if (sec.pinned) Box(Modifier.align(Alignment.TopStart).padding(6.dp)) { Tag("PIN", Red) }
+        Column(Modifier.align(Alignment.BottomStart).padding(horizontal = 10.dp, vertical = 8.dp)) {
+            Text(sec.title, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            Text("${sec.items.size}", color = Dim, fontSize = 12.sp, maxLines = 1)
+        }
+    }
+}
+
+/** Groups shown as a grid of tiles (5 per row, 4 with Large cards). OK opens a group, Back returns to the tiles. */
+@Composable
+fun GroupsGrid(vm: Vm, sections: List<Section>) {
+    if (sections.isEmpty()) {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Text("Nothing to show here.", color = Dim, fontSize = 20.sp)
+        }
+        return
+    }
+    val tab = vm.tab
+    val keyOf = { s: Section -> "$tab|${s.catId}|${s.title}" }
+    val openIdx = sections.indexOfFirst { keyOf(it) == vm.groupOpen }
+    var lastIdx by remember { mutableIntStateOf(-1) }
+    val gridState = rememberLazyGridState()
+    val tileFrs = remember { HashMap<Int, FocusRequester>() }
+    val contentFr = remember { FocusRequester() }
+
+    BackHandler(enabled = openIdx >= 0) { vm.groupOpen = "" }
+
+    // Opening a group puts focus on its first item; closing it puts focus back on the tile that was opened.
+    LaunchedEffect(openIdx) {
+        if (openIdx >= 0) {
+            repeat(10) {
+                delay(60)
+                val ok = try { contentFr.requestFocus(); true } catch (e: Exception) { false }
+                if (ok) return@LaunchedEffect
+            }
+        } else if (lastIdx >= 0) {
+            val i = lastIdx
+            try { gridState.scrollToItem(i) } catch (e: Exception) { }
+            repeat(10) {
+                delay(60)
+                val ok = try { tileFrs[i]?.requestFocus(); tileFrs[i] != null } catch (e: Exception) { false }
+                if (ok) return@LaunchedEffect
+            }
+        }
+    }
+
+    if (openIdx >= 0) {
+        val sec = sections[openIdx]
+        val live = tab == T_LIVE
+        val k = when (vm.cfg.cardSize) { 0 -> 0.85f; 2 -> 1.25f; else -> 1f }
+        Column(Modifier.fillMaxSize()) {
+            Row(
+                Modifier.fillMaxWidth().padding(start = 32.dp, end = 32.dp, top = 8.dp, bottom = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                Btn("◀  Groups", fill = KeyBg, fontSize = 16.sp, hPad = 18.dp) { vm.groupOpen = "" }
+                Text(sec.title, color = Light, fontSize = 22.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+                Text("${sec.items.size}", color = Dim, fontSize = 16.sp)
+            }
+            LazyVerticalGrid(
+                columns = GridCells.Adaptive((if (live) 220.dp else 156.dp) * k),
+                modifier = Modifier.weight(1f).fillMaxWidth().focusRequester(contentFr).focusGroup(),
+                contentPadding = PaddingValues(start = 32.dp, end = 32.dp, top = 12.dp, bottom = 24.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                gridItemsIndexed(sec.items) { i, item ->
+                    PosterCard(vm, item) {
+                        val c = sec.cont
+                        if (c != null) vm.resumeHist(c[i]) else vm.open(sec.items, i)
+                    }
+                }
+            }
+        }
+    } else {
+        val cols = if (vm.cfg.cardSize == 2) 4 else 5
+        LazyVerticalGrid(
+            columns = GridCells.Fixed(cols),
+            state = gridState,
+            modifier = Modifier.fillMaxSize().focusGroup(),
+            contentPadding = PaddingValues(start = 32.dp, end = 32.dp, top = 12.dp, bottom = 24.dp),
+            horizontalArrangement = Arrangement.spacedBy(14.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            gridItemsIndexed(sections) { i, sec ->
+                val fr = tileFrs.getOrPut(i) { FocusRequester() }
+                GroupTile(
+                    vm, sec, Modifier.focusRequester(fr),
+                    onMenu = { if (sec.catId.isNotEmpty()) vm.openGroupMenu(tab, sec.catId, sec.title) },
+                    onClick = { lastIdx = i; vm.groupOpen = keyOf(sec) }
+                )
             }
         }
     }
@@ -1306,7 +1445,7 @@ private val ASPECTS = listOf("Fit", "Fill", "Zoom")
 private val AGENTS = listOf("Default", "VLC", "Chrome", "IPTV Smarters")
 private val STARTS = listOf("Live TV", "Movies", "Series")
 private val SORTS = listOf("Provider order", "A to Z")
-private val LAYOUTS = listOf("Rows", "Category list and grid")
+private val LAYOUTS = listOf("Rows", "Category list and grid", "Groups grid (4-5 per row)")
 private val CARDS = listOf("Small", "Medium", "Large")
 
 @Composable

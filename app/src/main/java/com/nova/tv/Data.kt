@@ -153,7 +153,7 @@ fun loadCfg(sp: SharedPreferences): Cfg {
         epg = sp.getBoolean("epg", d.epg),
         anim = sp.getBoolean("anim", d.anim),
         hideAdult = sp.getBoolean("hideAdult", d.hideAdult),
-        layout = sp.getInt("layout", d.layout).coerceIn(0, 1),
+        layout = sp.getInt("layout", d.layout).coerceIn(0, 2),
         cardSize = sp.getInt("cardSize", d.cardSize).coerceIn(0, 2),
         titles = sp.getBoolean("titles", d.titles),
         contRow = sp.getBoolean("contRow", d.contRow),
@@ -557,6 +557,8 @@ class Vm(private val app: Application) : AndroidViewModel(app) {
     // ---- resume prompt, exit prompt, refresh timing ----
     var resumeReq by mutableStateOf<ResumeReq?>(null); private set
     var exitAsk by mutableStateOf(false)
+    /** Groups grid layout: key of the group that is currently opened ("" = showing the group tiles). */
+    var groupOpen by mutableStateOf("")
     private var startAt = -1L
     private var lastLoad = System.currentTimeMillis()
 
