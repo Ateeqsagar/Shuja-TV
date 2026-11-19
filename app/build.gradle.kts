@@ -26,7 +26,10 @@ android {
     }
     buildTypes {
         release {
-            isMinifyEnabled = false
+            // Shrinks and optimizes the app: smaller file, faster start and smoother scrolling.
+            // If this ever breaks the build, set it back to false.
+            isMinifyEnabled = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             signingConfig = signingConfigs.getByName("shuja")
         }
     }

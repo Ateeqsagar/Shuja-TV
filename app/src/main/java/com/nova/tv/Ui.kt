@@ -172,6 +172,8 @@ fun NovaApp(vm: Vm, onExit: () -> Unit) {
         vm.pinReq?.let { r -> PinDialog(r.create, r.title, { vm.submitPin(it) }) { vm.cancelPin() } }
         vm.menu?.let { m -> MenuDialog(vm, m) }
         vm.groupMenu?.let { g -> GroupMenuDialog(vm, g) }
+        vm.listPick?.let { pick -> ListPickDialog(vm, pick) }
+        if (vm.profilePick && vm.account != null) ProfilePicker(vm)
         vm.resumeReq?.let { r -> ResumeDialog(vm, r) }
         if (vm.exitAsk) ExitDialog(vm, onExit)
     }
@@ -463,17 +465,81 @@ fun MenuDialog(vm: Vm, m: MenuTarget) {
     }
     Dialog(onDismissRequest = { vm.closeMenu() }, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Column(
-            Modifier.width(440.dp).glass(10.dp).padding(28.dp).safeDpad(),
+            Modifier.width(440.dp).glass(10.dp).verticalScroll(rememberScrollState()).padding(28.dp).safeDpad(),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             Text(m.item.name, color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Btn(if (ik in vm.favKeys) "Remove from favorites" else "Add to favorites", Modifier.fillMaxWidth().focusRequester(fr), fill = GlassBtn) { vm.toggleFav(m.item) }
+            Btn("Add to a list…", Modifier.fillMaxWidth(), fill = GlassBtn, fontSize = 18.sp) { vm.openListPick(m.item) }
             Btn(if (ck in vm.pinKeys) "Unpin group: ${m.catName}" else "Pin group to top: ${m.catName}", Modifier.fillMaxWidth(), fill = GlassBtn, fontSize = 18.sp) { vm.togglePin(ck) }
             Btn(if (ik in vm.lockedKeys) "Unlock $noun (PIN)" else "Lock $noun", Modifier.fillMaxWidth(), fill = GlassBtn) { vm.toggleLock(ik) }
             Btn(if (ik in vm.hiddenKeys) "Unhide $noun" else "Hide $noun", Modifier.fillMaxWidth(), fill = GlassBtn) { vm.toggleHide(ik) }
             Btn(if (ck in vm.lockedKeys) "Unlock category: ${m.catName}" else "Lock category: ${m.catName}", Modifier.fillMaxWidth(), fill = GlassBtn, fontSize = 18.sp) { vm.toggleLock(ck) }
             Btn(if (ck in vm.hiddenKeys) "Unhide category: ${m.catName}" else "Hide category: ${m.catName}", Modifier.fillMaxWidth(), fill = GlassBtn, fontSize = 18.sp) { vm.toggleHide(ck) }
             Btn("Close", Modifier.fillMaxWidth(), fill = Color.White.copy(.07f)) { vm.closeMenu() }
+            LaunchedEffect(Unit) { fr.grab() }
+        }
+    }
+}
+
+/** A short warning when the subscription is not active or ends within a week; null when everything is fine. */
+fun expiryNote(info: AcctInfo): String? {
+    val st = info.status.trim()
+    if (st.isEmpty() || st.equals("Playlist", true)) return null
+    if (!st.equals("Active", true)) return "Subscription status: $st. Please contact your provider."
+    val d = try {
+        java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).parse(info.exp)
+    } catch (e: Exception) { null } ?: return null
+    val days = Math.floor((d.time + 86_400_000L - System.currentTimeMillis()) / 86_400_000.0).toInt()
+    return when {
+        days < 0 -> "Your subscription has expired. Please renew it with your provider."
+        days == 0 -> "Your subscription ends today."
+        days <= 7 -> "Your subscription ends in $days day${if (days == 1) "" else "s"} (${info.exp})."
+        else -> null
+    }
+}
+
+@Composable
+fun ExpiryBanner(text: String) {
+    val shape = RoundedCornerShape(8.dp)
+    Text(
+        text, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Medium,
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 48.dp, vertical = 4.dp).clip(shape)
+            .background(Color(0x55E50914)).border(1.dp, Red.copy(alpha = .6f), shape)
+            .padding(horizontal = 14.dp, vertical = 8.dp)
+    )
+}
+
+@Composable
+fun TourDialog(onDone: () -> Unit) {
+    val fr = remember { FocusRequester() }
+    val tv = rememberIsTv()
+    val tips = if (tv) listOf(
+        "Hold OK on any channel, movie, series or group to add it to favorites, lock or hide it, or pin its group to the top.",
+        "Press Left on the far left edge or Right on the far right edge to switch between Live TV, Movies and Series.",
+        "While watching: Left / Right skip, OK pause, Down for options, hold OK for player settings.",
+        "Live TV: Up / Down change channel, type a number to jump to it, and 0 returns to the last channel."
+    ) else listOf(
+        "Press and hold any channel, movie, series or group for more options, including pin to top.",
+        "Swipe the lists to browse. Tap a tab to switch between Live TV, Movies and Series.",
+        "While watching: tap the screen for controls, double-tap the left or right side to skip.",
+        "Drag the red bar to jump to any point in a movie or episode."
+    )
+    Dialog(onDismissRequest = onDone, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Column(
+            Modifier.width(560.dp).glass(16.dp).padding(30.dp).safeDpad(),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Text("WELCOME", color = Red, fontSize = 13.sp, fontWeight = FontWeight.Bold, letterSpacing = 2.sp)
+            Text("Getting around Shuja TV", color = Color.White, fontSize = 26.sp, fontWeight = FontWeight.Bold)
+            for (t in tips) {
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("•", color = Red, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                    Text(t, color = Color.White.copy(alpha = .88f), fontSize = 16.sp)
+                }
+            }
+            Spacer(Modifier.height(4.dp))
+            Btn("Got it", Modifier.fillMaxWidth().focusRequester(fr)) { onDone() }
             LaunchedEffect(Unit) { fr.grab() }
         }
     }
@@ -583,6 +649,8 @@ fun TopBar(vm: Vm) {
         NavTab("Movies", vm.tab == 1) { vm.selectTab(1) }
         NavTab("Series", vm.tab == 2) { vm.selectTab(2) }
         Spacer(Modifier.weight(1f))
+        ProfileChip(vm)
+        Spacer(Modifier.width(4.dp))
         NavTab("Settings", false) { vm.settingsOpen = true }
         Spacer(Modifier.width(8.dp))
         SearchBox(vm.query, { vm.query = it }, Modifier.width(260.dp)) { fm.moveFocus(FocusDirection.Down) }
@@ -598,6 +666,15 @@ fun Home(vm: Vm) {
     LaunchedEffect(tab) { vm.ensure(tab) }
     BackHandler(enabled = q.isNotEmpty()) { vm.query = "" }
     BackHandler(enabled = q.isEmpty() && !vm.exitAsk) { vm.exitAsk = true }
+
+    // Short welcome tips, shown once after the first sign-in.
+    val tourCtx = LocalContext.current
+    val tourSp = remember { tourCtx.getSharedPreferences("nova_tour", Context.MODE_PRIVATE) }
+    var tourOpen by remember { mutableStateOf(false) }
+    LaunchedEffect(vm.showIntro, vm.profilePick) {
+        if (!vm.showIntro && !vm.profilePick && !tourSp.getBoolean("seen", false)) { delay(800); tourOpen = true }
+    }
+    if (tourOpen) TourDialog { tourSp.edit().putBoolean("seen", true).apply(); tourOpen = false }
 
     val fm = LocalFocusManager.current
     val contentFr = remember { FocusRequester() }
@@ -636,20 +713,26 @@ fun Home(vm: Vm) {
     val recent = remember(lib, tab, cfg.recentRow, vm.hiddenKeys, vm.unlocked, cfg.hideAdult) {
         if (lib == null || tab == T_LIVE) emptyList<Item>() else vm.recentFor(lib)
     }
+    val listRows = remember(lib, vm.lists, vm.hiddenKeys, vm.unlocked, cfg.hideAdult) {
+        if (lib == null) emptyList<Pair<NamedList, List<Item>>>()
+        else vm.lists.map { l -> l to vm.listItems(lib, l) }.filter { it.second.isNotEmpty() }
+    }
     val pins = vm.pinKeys
-    val sections = remember(cont, recent, favs, rows, pins) {
+    val sections = remember(cont, recent, favs, rows, pins, listRows) {
         val out = ArrayList<Section>()
         if (cont.isNotEmpty()) out.add(Section("Continue Watching", cont.map { vm.contItem(it) }, cont))
         // Pinned groups come first, right after Continue Watching.
         for ((c, l) in rows) if (vm.catKey(tab, c.id) in pins) out.add(Section(c.name, l, null, true, c.id))
         if (recent.isNotEmpty()) out.add(Section("Recently Added", recent))
         if (favs.isNotEmpty()) out.add(Section("Favorites", favs))
+        for ((l, its) in listRows) out.add(Section(l.name, its))
         for ((c, l) in rows) if (vm.catKey(tab, c.id) !in pins) out.add(Section(c.name, l, null, false, c.id))
         out
     }
 
     Column(Modifier.fillMaxSize()) {
         TopBar(vm)
+        expiryNote(vm.info)?.let { ExpiryBanner(it) }
         Box(
             Modifier.weight(1f).fillMaxWidth().focusRequester(contentFr).focusGroup()
                 // A held D-pad key repeats faster than the list can follow; skipping some repeats keeps scrolling smooth.
@@ -1236,6 +1319,10 @@ fun SettingsScreen(vm: Vm) {
 
     FullDialog({ vm.settingsOpen = false }) {
         var confirmOut by remember { mutableStateOf(false) }
+        var naming by remember { mutableIntStateOf(0) }
+        var confirmDel by remember { mutableStateOf("") }
+        if (naming == 1) NameDialog("New profile", "Profile name", { vm.addProfile(it) }) { naming = 0 }
+        if (naming == 2) NameDialog("New list", "List name", { vm.createList(it, null) }) { naming = 0 }
         Row(
             Modifier.fillMaxSize()
                 .background(Brush.radialGradient(listOf(Color(0xFF3A0F2E), Color(0xFF150A12), Color.Black)))
@@ -1291,6 +1378,27 @@ fun SettingsScreen(vm: Vm) {
                 item {
                     SettingRow(if (confirmOut) "Press OK again to sign out" else "Sign out", if (confirmOut) "Tap elsewhere to cancel" else "") {
                         if (confirmOut) vm.logout() else confirmOut = true
+                    }
+                }
+
+                item { SectionTitle("Profiles and lists") }
+                item { SettingRow("Current profile", vm.profiles.firstOrNull { it.id == vm.profileId }?.name ?: "") { vm.openProfilePick() } }
+                item { SettingRow("Add profile", "${vm.profiles.size} of 6") { naming = 1 } }
+                if (vm.profiles.size > 1) {
+                    for (p in vm.profiles) {
+                        item {
+                            SettingRow("Delete profile: ${p.name}", if (confirmDel == "p:" + p.id) "Press OK again to delete" else "") {
+                                if (confirmDel == "p:" + p.id) { vm.deleteProfile(p.id); confirmDel = "" } else confirmDel = "p:" + p.id
+                            }
+                        }
+                    }
+                }
+                item { SettingRow("Create list", "${vm.lists.size} of 10") { naming = 2 } }
+                for (l in vm.lists) {
+                    item {
+                        SettingRow("Delete list: ${l.name}", if (confirmDel == "l:" + l.name) "Press OK again to delete" else "${l.keys.size} items") {
+                            if (confirmDel == "l:" + l.name) { vm.deleteList(l.name); confirmDel = "" } else confirmDel = "l:" + l.name
+                        }
                     }
                 }
 
@@ -1365,4 +1473,141 @@ fun SettingsScreen(vm: Vm) {
             }
         }
     }
+}
+
+
+// ---------------- profiles and lists ----------------
+
+private val PROFILE_COLORS = listOf(
+    Color(0xFFE50914), Color(0xFF2E7DFF), Color(0xFF1DB954), Color(0xFFF5A623), Color(0xFF9B59B6), Color(0xFF16A085)
+)
+
+fun profileColor(i: Int): Color = PROFILE_COLORS[(if (i < 0) 0 else i) % PROFILE_COLORS.size]
+fun profileInitial(n: String): String = n.trim().take(1).uppercase().ifEmpty { "?" }
+
+/** Small round button in the top bar: shows the current profile and opens the profile picker. */
+@Composable
+fun ProfileChip(vm: Vm) {
+    val idx = vm.profiles.indexOfFirst { it.id == vm.profileId }
+    val name = vm.profiles.getOrNull(idx)?.name ?: ""
+    var f by remember { mutableStateOf(false) }
+    Box(
+        Modifier.size(38.dp).clip(RoundedCornerShape(50)).background(profileColor(idx))
+            .border(2.dp, if (f) Color.White else Color.Transparent, RoundedCornerShape(50))
+            .onFocusChanged { f = it.hasFocus }.clickable { vm.openProfilePick() },
+        contentAlignment = Alignment.Center
+    ) { Text(profileInitial(name), color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold) }
+}
+
+@Composable
+private fun ProfileTile(name: String, initial: String, color: Color, current: Boolean, modifier: Modifier, onClick: () -> Unit) {
+    var f by remember { mutableStateOf(false) }
+    val shape = RoundedCornerShape(16.dp)
+    Column(
+        modifier.width(150.dp).clip(RoundedCornerShape(14.dp)).onFocusChanged { f = it.hasFocus }
+            .clickable(onClick = onClick).padding(10.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Box(
+            Modifier.size(110.dp).clip(shape).background(color)
+                .border(3.dp, if (f) Color.White else if (current) Color.White.copy(alpha = .5f) else Color.Transparent, shape),
+            contentAlignment = Alignment.Center
+        ) { Text(initial, color = Color.White, fontSize = 52.sp, fontWeight = FontWeight.Bold) }
+        Text(name, color = if (f) Color.White else Dim, fontSize = 18.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
+}
+
+/** Full-screen "Who's watching?" chooser. */
+@Composable
+fun ProfilePicker(vm: Vm) {
+    val fr = remember { FocusRequester() }
+    var naming by remember { mutableStateOf(false) }
+    val curIdx = vm.profiles.indexOfFirst { it.id == vm.profileId }.coerceAtLeast(0)
+    Dialog(
+        onDismissRequest = { vm.closeProfilePick() },
+        properties = DialogProperties(usePlatformDefaultWidth = false, dismissOnClickOutside = false)
+    ) {
+        Box(
+            Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color(0xF2200F1C), Color(0xFA060407)))).safeDpad(),
+            contentAlignment = Alignment.Center
+        ) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(36.dp)) {
+                Text("Who's watching?", color = Color.White, fontSize = 38.sp, fontWeight = FontWeight.Bold)
+                LazyRow(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(32.dp, Alignment.CenterHorizontally),
+                    contentPadding = PaddingValues(horizontal = 48.dp)
+                ) {
+                    itemsIndexed(vm.profiles) { i, p ->
+                        ProfileTile(p.name, profileInitial(p.name), profileColor(i), i == curIdx, if (i == curIdx) Modifier.focusRequester(fr) else Modifier) {
+                            vm.switchProfile(p.id)
+                        }
+                    }
+                    if (vm.profiles.size < 6) {
+                        item { ProfileTile("Add profile", "+", Color(0xFF3A3A3F), false, Modifier) { naming = true } }
+                    }
+                }
+                Text(
+                    "Each profile keeps its own favorites, lists, pinned groups and continue watching.",
+                    color = Dim, fontSize = 15.sp, textAlign = TextAlign.Center
+                )
+            }
+        }
+    }
+    if (naming) NameDialog("New profile", "Profile name", { vm.addProfile(it) }) { naming = false }
+    LaunchedEffect(Unit) { delay(150); fr.grab() }
+}
+
+/** Asks for a short name (new profile or new list). [onSave] returns false when the name can't be used. */
+@Composable
+fun NameDialog(title: String, hint: String, onSave: (String) -> Boolean, onClose: () -> Unit) {
+    var text by remember { mutableStateOf("") }
+    var err by remember { mutableStateOf(false) }
+    val fr = remember { FocusRequester() }
+    fun save() { if (onSave(text)) onClose() else err = true }
+    Dialog(onDismissRequest = onClose, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Column(
+            Modifier.width(460.dp).glass(16.dp).padding(28.dp).safeDpad(),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Text(title, color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold)
+            Field(text, { text = it; err = false }, hint, Modifier.focusRequester(fr), ime = ImeAction.Done, onGo = { save() })
+            if (err) Text("That name can't be used (empty, already taken, or the limit is reached).", color = Red, fontSize = 14.sp)
+            Btn("Save", Modifier.fillMaxWidth()) { save() }
+            Btn("Cancel", Modifier.fillMaxWidth(), fill = GlassBtn, fontSize = 18.sp) { onClose() }
+            LaunchedEffect(Unit) { fr.grab() }
+        }
+    }
+}
+
+/** Choose which lists a title belongs to (Favorites and any custom list), or start a new list. */
+@Composable
+fun ListPickDialog(vm: Vm, item: Item) {
+    val fr = remember { FocusRequester() }
+    var naming by remember { mutableStateOf(false) }
+    val ik = vm.itemKey(item)
+    Dialog(onDismissRequest = { vm.closeListPick() }, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Column(
+            Modifier.width(460.dp).glass(16.dp).padding(28.dp).safeDpad(),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Text("ADD TO LIST", color = Red, fontSize = 13.sp, fontWeight = FontWeight.Bold, letterSpacing = 2.sp)
+            Text(item.name, color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            LazyColumn(Modifier.heightIn(max = 280.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                item {
+                    Btn((if (ik in vm.favKeys) "✓  " else "") + "Favorites", Modifier.fillMaxWidth().focusRequester(fr), fill = GlassBtn, fontSize = 18.sp) { vm.toggleFav(item) }
+                }
+                itemsIndexed(vm.lists) { _, l ->
+                    Btn((if (ik in l.keys) "✓  " else "") + l.name, Modifier.fillMaxWidth(), fill = GlassBtn, fontSize = 18.sp) { vm.toggleInList(l.name, item) }
+                }
+                if (vm.lists.size < 10) {
+                    item { Btn("+  New list", Modifier.fillMaxWidth(), fill = GlassBtn, fontSize = 18.sp) { naming = true } }
+                }
+            }
+            Btn("Done", Modifier.fillMaxWidth()) { vm.closeListPick() }
+            LaunchedEffect(Unit) { fr.grab() }
+        }
+    }
+    if (naming) NameDialog("New list", "List name", { vm.createList(it, item) }) { naming = false }
 }

@@ -138,6 +138,33 @@ private fun buildPlayer(ctx: Context, cfg: Cfg, ua: String, vod: Boolean): ExoPl
     return p
 }
 
+private fun digitOf(k: Key): Int = when (k) {
+    Key.Zero, Key.NumPad0 -> 0
+    Key.One, Key.NumPad1 -> 1
+    Key.Two, Key.NumPad2 -> 2
+    Key.Three, Key.NumPad3 -> 3
+    Key.Four, Key.NumPad4 -> 4
+    Key.Five, Key.NumPad5 -> 5
+    Key.Six, Key.NumPad6 -> 6
+    Key.Seven, Key.NumPad7 -> 7
+    Key.Eight, Key.NumPad8 -> 8
+    Key.Nine, Key.NumPad9 -> 9
+    else -> -1
+}
+
+private val LANG3 = mapOf(
+    "eng" to "en", "ara" to "ar", "hin" to "hi", "urd" to "ur", "fre" to "fr", "fra" to "fr",
+    "spa" to "es", "ger" to "de", "deu" to "de", "tur" to "tr"
+)
+
+/** Two-letter language code for an audio track (tracks may use 2- or 3-letter codes). */
+private fun langCode(l: String?): String {
+    val s = (l ?: "").lowercase().trim()
+    return LANG3[s] ?: s.take(2)
+}
+
+private val SLEEPS = listOf(0, 15, 30, 45, 60, 90)
+
 /**
  * Second, tiny player used only for the live seek preview: video only, no sound, lowest quality,
  * paused. Seeking it to the jump target shows the real frame at that time (like Netflix).
@@ -186,6 +213,9 @@ private fun PlayerBody(list: List<Item>, start: Int, vm: Vm, onExit: () -> Unit)
     var menuPage by remember { mutableIntStateOf(0) }
     var speed by remember { mutableFloatStateOf(1f) }
     val okLong = remember { booleanArrayOf(false) }
+    var numBuf by remember { mutableStateOf("") }
+    var sleepMin by remember { mutableIntStateOf(0) }
+    val lastIdx = remember { intArrayOf(-1, start.coerceIn(0, list.lastIndex)) }
     var idx by remember { mutableIntStateOf(start.coerceIn(0, list.lastIndex)) }
     val item = list[idx]
     val cur by rememberUpdatedState(item)
@@ -429,6 +459,31 @@ private fun PlayerBody(list: List<Item>, start: Int, vm: Vm, onExit: () -> Unit)
         ping++
     }
 
+    // Last channel: remember the channel watched before this one.
+    LaunchedEffect(idx) {
+        if (lastIdx[1] != idx) { lastIdx[0] = lastIdx[1]; lastIdx[1] = idx }
+    }
+    // Typing a channel number (the number shown as "3 / 120") jumps to it after a short pause.
+    LaunchedEffect(numBuf) {
+        if (numBuf.isNotEmpty()) {
+            delay(1500)
+            val n = numBuf.toIntOrNull()
+            numBuf = ""
+            if (n != null && n in 1..list.size && n - 1 != idx) {
+                val c = list[n - 1]
+                if (vm.unlocked || (!vm.isLocked(c) && !vm.isHidden(c))) idx = n - 1
+            }
+        }
+    }
+    // Sleep timer: stops playback and leaves the player.
+    LaunchedEffect(sleepMin) {
+        if (sleepMin > 0) {
+            delay(sleepMin * 60_000L)
+            player.pause()
+            onExit()
+        }
+    }
+
     fun togglePlay() {
         player.playWhenReady = !player.playWhenReady
         ping++
@@ -482,6 +537,21 @@ private fun PlayerBody(list: List<Item>, start: Int, vm: Vm, onExit: () -> Unit)
                 }
             }
             if (e.type != KeyEventType.KeyDown) return@onPreviewKeyEvent dpad
+            val dg = digitOf(k)
+            if (dg >= 0 && item.live) {
+                if (dg == 0 && numBuf.isEmpty()) {
+                    // 0 on its own = go back to the last channel
+                    val p = lastIdx[0]
+                    if (p in list.indices && p != idx) {
+                        val c = list[p]
+                        if (vm.unlocked || (!vm.isLocked(c) && !vm.isHidden(c))) idx = p
+                    }
+                } else if (numBuf.length < 4) {
+                    numBuf += dg.toString()
+                }
+                ping++
+                return@onPreviewKeyEvent true
+            }
             when (k) {
                 Key.DirectionUp, Key.ChannelUp -> { if (item.live) idx = step(1); ping++; true }
                 Key.DirectionDown, Key.ChannelDown -> {
@@ -520,6 +590,13 @@ private fun PlayerBody(list: List<Item>, start: Int, vm: Vm, onExit: () -> Unit)
 
         if (buffering && error == null) CircularProgressIndicator(Modifier.align(Alignment.Center).size(56.dp), color = Red, strokeWidth = 5.dp)
         error?.let { Text(it, color = Red, fontSize = 22.sp, textAlign = TextAlign.Center, modifier = Modifier.align(Alignment.Center)) }
+        if (numBuf.isNotEmpty() && item.live) {
+            Text(
+                "Channel $numBuf", color = Color.White, fontSize = 40.sp, fontWeight = FontWeight.Bold,
+                modifier = Modifier.align(Alignment.TopEnd).padding(40.dp).clip(RoundedCornerShape(12.dp))
+                    .background(Color.Black.copy(.65f)).padding(horizontal = 24.dp, vertical = 10.dp)
+            )
+        }
 
         val sc = scrub ?: hold
         if (!item.live) {
@@ -556,6 +633,7 @@ private fun PlayerBody(list: List<Item>, start: Int, vm: Vm, onExit: () -> Unit)
         if (menuOpen) {
             PlayerSettings(
                 player = player, vm = vm, live = item.live, title = item.name, speed = speed, initialPage = menuPage,
+                sleepMin = sleepMin, onSleep = { m -> sleepMin = m },
                 onSpeed = { v -> speed = v; player.playbackParameters = PlaybackParameters(v) },
                 onClose = { menuOpen = false; ping++ }
             )
@@ -651,7 +729,7 @@ private fun PlayerBody(list: List<Item>, start: Int, vm: Vm, onExit: () -> Unit)
                         Text("Settings", color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.Bold)
                     }
                     if (tv) Text(
-                        if (item.live) "▲ ▼  channel     Hold OK  settings" else "◀ ${backMs / 1000}s   ${fwdMs / 1000}s ▶     OK  pause     Hold OK  settings",
+                        if (item.live) "▲ ▼  channel     0-9  go to number     0  last channel     Hold OK  settings" else "◀ ${backMs / 1000}s   ${fwdMs / 1000}s ▶     OK  pause     Hold OK  settings",
                         color = Dim, fontSize = 14.sp
                     )
                 }
@@ -981,6 +1059,7 @@ private fun OptRow(label: String, value: String, modifier: Modifier = Modifier, 
 @Composable
 private fun PlayerSettings(
     player: ExoPlayer, vm: Vm, live: Boolean, title: String, speed: Float, initialPage: Int,
+    sleepMin: Int, onSleep: (Int) -> Unit,
     onSpeed: (Float) -> Unit, onClose: () -> Unit
 ) {
     var page by remember { mutableIntStateOf(initialPage) }
@@ -1004,6 +1083,11 @@ private fun PlayerSettings(
             .setOverrideForType(TrackSelectionOverride(o.group.mediaTrackGroup, listOf(o.index)))
         if (o.group.type == C.TRACK_TYPE_TEXT) b = b.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
         player.trackSelectionParameters = b.build()
+        if (o.group.type == C.TRACK_TYPE_AUDIO) {
+            // The chosen language becomes the default for the next videos (Settings > Audio language).
+            val ai = AUDIO_CODES.indexOf(langCode(o.group.getTrackFormat(o.index).language))
+            if (ai > 0 && ai != vm.cfg.audio) vm.updateCfg(vm.cfg.copy(audio = ai))
+        }
         if (o.group.type == C.TRACK_TYPE_TEXT) {
             subsOn = true
             if (!vm.cfg.subs) vm.updateCfg(vm.cfg.copy(subs = true))
@@ -1020,6 +1104,7 @@ private fun PlayerSettings(
         2 -> audio.indexOfFirst { it.selected }.coerceAtLeast(0)
         3 -> if (!subsOn) 0 else (text.indexOfFirst { it.selected } + 1).coerceAtLeast(0)
         4 -> SPEEDS.indexOf(speed).coerceAtLeast(0)
+        5 -> SLEEPS.indexOf(sleepMin).coerceAtLeast(0)
         else -> 0
     }
     val listState = remember(page) { LazyListState((selIdx - 1).coerceAtLeast(0)) }
@@ -1037,7 +1122,7 @@ private fun PlayerSettings(
                 GearIcon(Modifier.size(24.dp), Red)
                 Column(Modifier.weight(1f)) {
                     Text(
-                        when (page) { 1 -> "Aspect ratio"; 2 -> "Audio"; 3 -> "Subtitles"; 4 -> "Playback speed"; else -> "Player settings" },
+                        when (page) { 1 -> "Aspect ratio"; 2 -> "Audio"; 3 -> "Subtitles"; 4 -> "Playback speed"; 5 -> "Sleep timer"; else -> "Player settings" },
                         color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold
                     )
                     if (page == 0) Text(title, color = Dim, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -1057,6 +1142,7 @@ private fun PlayerSettings(
                         OptRow("Subtitles", if (!subsOn) "Off" else (cur?.name ?: if (text.isEmpty()) "None available" else "On")) { page = 3 }
                     }
                     if (!live) item { OptRow("Playback speed", speedName(speed)) { page = 4 } }
+                    item { OptRow("Sleep timer", if (sleepMin == 0) "Off" else "$sleepMin min") { page = 5 } }
                     item { OptRow("Close", "") { onClose() } }
                 } else {
                     item { OptRow("‹  Back", "") { page = 0 } }
@@ -1083,6 +1169,9 @@ private fun PlayerSettings(
                         }
                         4 -> itemsIndexed(SPEEDS) { i, v ->
                             OptRow(speedName(v), if (v == speed) "✓" else "", if (i == selIdx) Modifier.focusRequester(fr) else Modifier) { onSpeed(v) }
+                        }
+                        5 -> itemsIndexed(SLEEPS) { i, m ->
+                            OptRow(if (m == 0) "Off" else "$m minutes", if (m == sleepMin) "✓" else "", if (i == selIdx) Modifier.focusRequester(fr) else Modifier) { onSleep(m) }
                         }
                         else -> {}
                     }

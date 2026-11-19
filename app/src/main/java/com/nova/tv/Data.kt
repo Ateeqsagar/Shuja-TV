@@ -96,6 +96,12 @@ class ResumeReq(val list: List<Item>, val index: Int, val posMs: Long)
 class PinReq(val title: String, val create: Boolean, val onOk: () -> Unit)
 class MenuTarget(val item: Item, val catId: String, val catName: String)
 
+/** One person using the app: has their own favorites, lists, pinned groups and continue watching. */
+class Profile(val id: String, val name: String)
+
+/** A custom favorites list (for example "Sports" or "Kids"). */
+class NamedList(val name: String, val keys: Set<String>)
+
 /** A group (category) picked for the pin menu. */
 class GroupTarget(val type: Int, val catId: String, val name: String)
 
@@ -498,9 +504,33 @@ fun friendly(e: Throwable): String = when (e) {
 class Vm(app: Application) : AndroidViewModel(app) {
     private val sp = app.getSharedPreferences("nova", 0)
     private val cfgSp = app.getSharedPreferences("nova_cfg", 0)
-    private val favSp = app.getSharedPreferences("nova_fav", 0)
-    private val posSp = app.getSharedPreferences("nova_pos", 0)
-    private val histSp = app.getSharedPreferences("nova_hist", 0)
+    // ---- profiles: the first profile ("main") keeps the old storage names, so nothing is lost ----
+    private val profSp = app.getSharedPreferences("nova_profiles", 0)
+    private fun readProfiles(): List<Profile> {
+        val out = ArrayList<Profile>()
+        try {
+            val a = JSONArray(profSp.getString("list", "[]") ?: "[]")
+            for (i in 0 until a.length()) {
+                val o = a.optJSONObject(i) ?: continue
+                val id = o.optString("i")
+                val n = o.optString("n")
+                if (id.isNotBlank() && n.isNotBlank()) out.add(Profile(id, n))
+            }
+        } catch (e: Exception) {
+        }
+        if (out.isEmpty()) out.add(Profile("main", "Main"))
+        return out
+    }
+    var profiles by mutableStateOf(readProfiles()); private set
+    var profileId by mutableStateOf(
+        (profSp.getString("cur", "main") ?: "main").let { c -> if (profiles.any { it.id == c }) c else profiles.first().id }
+    ); private set
+    private fun pn(base: String, id: String = profileId) = if (id == "main") base else "${base}_$id"
+    var profilePick by mutableStateOf(profiles.size > 1); private set
+
+    private var favSp = app.getSharedPreferences(pn("nova_fav"), 0)
+    private var posSp = app.getSharedPreferences(pn("nova_pos"), 0)
+    private var histSp = app.getSharedPreferences(pn("nova_hist"), 0)
     private val vault = Vault(app)
     private var api: Xtream? = null
     private var job: Job? = null
@@ -546,6 +576,27 @@ class Vm(app: Application) : AndroidViewModel(app) {
 
     // ---- favorites ----
     var favKeys by mutableStateOf<Set<String>>(favSp.getStringSet("k", emptySet())?.toSet() ?: emptySet()); private set
+
+    // ---- custom favorites lists ----
+    private fun readLists(): List<NamedList> {
+        val out = ArrayList<NamedList>()
+        try {
+            val a = JSONArray(favSp.getString("lists", "[]") ?: "[]")
+            for (i in 0 until a.length()) {
+                val o = a.optJSONObject(i) ?: continue
+                val n = o.optString("n")
+                if (n.isBlank()) continue
+                val set = LinkedHashSet<String>()
+                val ks = o.optJSONArray("k")
+                if (ks != null) for (j in 0 until ks.length()) set.add(ks.optString(j))
+                out.add(NamedList(n, set))
+            }
+        } catch (e: Exception) {
+        }
+        return out
+    }
+    var lists by mutableStateOf(readLists()); private set
+    var listPick by mutableStateOf<Item?>(null); private set
 
     // ---- pinned groups (shown at the top of Live TV, Movies and Series) ----
     var pinKeys by mutableStateOf<Set<String>>(favSp.getStringSet("pins", emptySet())?.toSet() ?: emptySet()); private set
@@ -683,6 +734,7 @@ class Vm(app: Application) : AndroidViewModel(app) {
         if (account == null) return
         lastLoad = System.currentTimeMillis()
         showIntro = true
+        profilePick = profiles.size > 1
         refreshAll()
     }
 
@@ -799,6 +851,7 @@ class Vm(app: Application) : AndroidViewModel(app) {
         playing = null; detail = null; detailInfo = null; settingsOpen = false
         unlocked = false; epgMap.clear(); query = ""; error = null; menu = null; pinReq = null
         hist = emptyList(); histSp.edit().clear().apply()
+        profilePick = false; listPick = null
         m3uEps = emptyMap(); showIntro = false; movie = null; movieMeta = null; posters.clear()
     }
 
@@ -1085,6 +1138,98 @@ class Vm(app: Application) : AndroidViewModel(app) {
 
     fun openGroupMenu(type: Int, catId: String, name: String) { groupMenu = GroupTarget(type, catId, name) }
     fun closeGroupMenu() { groupMenu = null }
+
+    // ---- profiles ----
+    private fun writeProfiles(v: List<Profile>) {
+        val a = JSONArray()
+        for (p in v) a.put(JSONObject().put("i", p.id).put("n", p.name))
+        profSp.edit().putString("list", a.toString()).apply()
+    }
+
+    fun openProfilePick() { profilePick = true }
+    fun closeProfilePick() { profilePick = false }
+
+    fun addProfile(name: String): Boolean {
+        val n = name.trim().take(16)
+        if (n.isBlank() || profiles.size >= 6) return false
+        val p = Profile("p" + System.currentTimeMillis(), n)
+        val nv = profiles + p
+        profiles = nv
+        writeProfiles(nv)
+        switchProfile(p.id)
+        return true
+    }
+
+    fun switchProfile(id: String) {
+        if (profiles.none { it.id == id }) return
+        profilePick = false
+        if (id == profileId) return
+        profileId = id
+        profSp.edit().putString("cur", id).apply()
+        favSp = app.getSharedPreferences(pn("nova_fav"), 0)
+        posSp = app.getSharedPreferences(pn("nova_pos"), 0)
+        histSp = app.getSharedPreferences(pn("nova_hist"), 0)
+        favKeys = favSp.getStringSet("k", emptySet())?.toSet() ?: emptySet()
+        pinKeys = favSp.getStringSet("pins", emptySet())?.toSet() ?: emptySet()
+        lists = readLists()
+        hist = loadHist(histSp)
+        histSeries = null
+        menu = null; groupMenu = null; listPick = null; resumeReq = null
+    }
+
+    fun deleteProfile(id: String) {
+        if (profiles.size <= 1) return
+        val nv = profiles.filter { it.id != id }
+        if (nv.size == profiles.size) return
+        for (b in listOf("nova_fav", "nova_pos", "nova_hist")) {
+            app.getSharedPreferences(pn(b, id), 0).edit().clear().apply()
+        }
+        profiles = nv
+        writeProfiles(nv)
+        if (id == profileId) switchProfile(nv.first().id)
+    }
+
+    // ---- custom lists ----
+    private fun writeLists(v: List<NamedList>) {
+        val a = JSONArray()
+        for (l in v) {
+            val k = JSONArray()
+            for (x in l.keys) k.put(x)
+            a.put(JSONObject().put("n", l.name).put("k", k))
+        }
+        favSp.edit().putString("lists", a.toString()).apply()
+    }
+
+    fun openListPick(item: Item) { menu = null; listPick = item }
+    fun closeListPick() { listPick = null }
+
+    fun createList(name: String, first: Item?): Boolean {
+        val n = name.trim().take(20)
+        if (n.isBlank() || n.equals("favorites", true) || lists.size >= 10 || lists.any { it.name.equals(n, true) }) return false
+        val keys: Set<String> = if (first != null) setOf(itemKey(first)) else emptySet()
+        val nv = lists + NamedList(n, keys)
+        lists = nv
+        writeLists(nv)
+        return true
+    }
+
+    fun toggleInList(name: String, item: Item) {
+        val k = itemKey(item)
+        val nv = lists.map { l -> if (l.name == name) NamedList(l.name, if (k in l.keys) l.keys - k else l.keys + k) else l }
+        lists = nv
+        writeLists(nv)
+    }
+
+    fun deleteList(name: String) {
+        val nv = lists.filter { it.name != name }
+        lists = nv
+        writeLists(nv)
+    }
+
+    fun listItems(lib: Lib, l: NamedList): List<Item> {
+        if (l.keys.isEmpty()) return emptyList()
+        return lib.all.filter { itemKey(it) in l.keys && passes(it, lib) }
+    }
 
     // ---- lock / hide ----
     fun itemKey(i: Item) = "i:${i.type}:${i.id}"
